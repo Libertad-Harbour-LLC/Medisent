@@ -152,10 +152,10 @@ def _registry_line(view: CandidateView) -> str:
         else ("не действует" if view.ru_valid is False else "статус неизвестен")
     )
     return texts.RU_FOUND.format(
-        number=view.ru_number,
-        holder=view.ru_holder or "держатель не указан",
+        number=texts.esc(view.ru_number),
+        holder=texts.esc(view.ru_holder or "держатель не указан"),
         status=status,
-        registry=view.ru_registry or "?",
+        registry=texts.esc(view.ru_registry or "?"),
     )
 
 
@@ -320,7 +320,13 @@ def render(report: Report) -> list[str]:
 
     Рендерит код. Модель к тексту, который увидит владелец, не прикасается.
     """
-    header = texts.REPORT_HEADER.format(token=report.request_token, product=report.product)
+    # Всё, что не наша разметка, экранируется: названия и контакты пришли с
+    # чужих сайтов, reason и concerns написала модель. Одно «A&D» в названии
+    # без экранирования — и Telegram отвергает весь отчёт.
+    esc = texts.esc
+    header = texts.REPORT_HEADER.format(
+        token=esc(report.request_token), product=esc(report.product)
+    )
     blocks: list[str] = [header]
 
     if report.llm_failed:
@@ -329,9 +335,9 @@ def render(report: Report) -> list[str]:
         blocks.append(texts.UNREGA_UNAVAILABLE + "\n")
 
     for index, view in enumerate(report.candidates, start=1):
-        lines = [f"<b>{index}. {view.supplier_name}</b>"]
+        lines = [f"<b>{index}. {esc(view.supplier_name)}</b>"]
         if view.domain:
-            lines.append(f"   {view.domain}")
+            lines.append(f"   {esc(view.domain)}")
 
         # Два независимых поля. Именно так, разными строками, с разными
         # подписями. Сливать их в одно «проверено» запрещено.
@@ -340,7 +346,7 @@ def render(report: Report) -> list[str]:
 
         if view.site_price is not None:
             lines.append(f"   Цена на сайте: {view.site_price:,.0f} ₽".replace(",", " "))
-        contacts = " · ".join(filter(None, [view.email, view.phone]))
+        contacts = " · ".join(esc(c) for c in (view.email, view.phone) if c)
         lines.append(f"   Контакты: {contacts}" if contacts else "   Контакты: не найдены")
 
         if view.unrega_flags:
@@ -348,16 +354,18 @@ def render(report: Report) -> list[str]:
         if view.injection_suspected:
             lines.append(f"   {texts.INJECTION_SUSPECTED}")
         if view.reason:
-            lines.append(f"   <i>{view.reason}</i>")
+            lines.append(f"   <i>{esc(view.reason)}</i>")
         for concern in view.concerns:
-            lines.append(f"   — {concern}")
+            lines.append(f"   — {esc(concern)}")
 
         blocks.append("\n".join(lines) + "\n")
 
     if report.summary:
-        blocks.append(f"<b>Вывод:</b> {report.summary}\n")
+        blocks.append(f"<b>Вывод:</b> {esc(report.summary)}\n")
     if report.missing_data:
-        blocks.append("<b>Не хватило данных:</b> " + "; ".join(report.missing_data) + "\n")
+        blocks.append(
+            "<b>Не хватило данных:</b> " + "; ".join(esc(m) for m in report.missing_data) + "\n"
+        )
     blocks.append(texts.REPORT_FOOTER)
 
     return _pack(blocks)

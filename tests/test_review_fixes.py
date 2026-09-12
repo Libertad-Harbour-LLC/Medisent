@@ -451,3 +451,301 @@ async def test_non_numeric_model_id_does_not_kill_the_report(
     )
     assert failed is False
     assert len(ordered) == 3, "все кандидаты на месте, выдуманный id просто отброшен"
+
+
+# --- №3: чужой текст в Telegram-HTML ----------------------------------------
+
+
+def test_for_owner_escapes_html_so_telegram_accepts_the_reply() -> None:
+    """``Иван <ivan@x.ru> писал(а):`` есть почти в каждом ответе. Без
+    экранирования Telegram отвергал сообщение, а письмо уже было помечено
+    обработанным — и терялось."""
+    from bot.services import guard
+
+    framed = guard.for_owner("Иван <ivan@x.ru> писал(а): цена A&D — 100")
+    assert "&lt;ivan@x.ru&gt;" in framed
+    assert "A&amp;D" in framed
+    assert "<ivan@x.ru>" not in framed
+    assert texts.UNTRUSTED_OPEN in framed and texts.UNTRUSTED_CLOSE in framed
+
+
+def test_supplier_names_are_escaped_in_every_owner_facing_text() -> None:
+    nasty = "ООО <Медтех> & Ко"
+    for rendered in (
+        texts.reply_received(nasty, "RFQ-2026-001"),
+        texts.selection_confirmed(nasty),
+        texts.mail_already_sent(nasty),
+        texts.mail_draft(nasty, "a@b.ru", "<script>"),
+        texts.intake_recognised(nasty, "10 <шт>", "RFQ-2026-001"),
+        texts.kp_price_suspicious(nasty, "1 000.00"),
+        texts.blacklist_line(1, nasty, "<плохо>", "01.01.2026"),
+    ):
+        assert "<Медтех>" not in rendered, rendered
+        assert (
+            "&lt;Медтех&gt;" in rendered or "&lt;шт&gt;" in rendered or "&lt;script&gt;" in rendered
+        )
+
+
+def test_report_render_escapes_third_party_strings() -> None:
+    from bot.services.report import Report, render
+    from tests.test_report_render import make_view
+
+    view = make_view(
+        supplier_name="A&D <Медтех>",
+        domain="a&d.ru",
+        email="sales@a&d.ru",
+        ru_holder="АО <Держатель>",
+    )
+    view.reason = "дешевле <всех>"
+    view.concerns = ["нет РУ & сайта"]
+    report = Report(request_token="RFQ-1", product="Тонометр <UA>", candidates=[view])
+    text = "\n".join(render(report))
+    for raw in ("<Медтех>", "<Держатель>", "<всех>", "<UA>"):
+        assert raw not in text
+    assert "A&amp;D &lt;Медтех&gt;" in text
+    assert "&lt;UA&gt;" in text
+
+
+# --- №3: курсор почты двигается после обработки ----------------------------
+
+
+class _FakeBot:
+    def __init__(self) -> None:
+        self.messages: list[dict[str, Any]] = []
+
+    async def send_message(self, chat_id: int, text: str, **kwargs: Any) -> None:
+        self.messages.append({"text": text, **kwargs})
+
+    async def send_document(self, chat_id: int, document: Any, **kwargs: Any) -> None:
+        self.messages.append({"document": document})
+
+
+async def test_poll_batch_retries_a_failed_letter_and_keeps_the_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bot import scheduler
+
+    scheduler._handled.clear()
+    scheduler._attempts.clear()
+    handled: list[str] = []
+
+    async def flaky(bot: Any, message_id: str) -> None:
+        handled.append(message_id)
+        if message_id == "m2":
+            raise RuntimeError("can't parse entities")
+
+    monkeypatch.setattr(scheduler, "_handle_incoming", flaky)
+    bot = _FakeBot()
+
+    # Первый цикл: m1 разобрано, m2 упало — курсор стоит.
+    assert await scheduler._handle_batch(bot, ["m1", "m2", "m3"]) is False  # type: ignore[arg-type]
+    assert handled == ["m1", "m2"]
+    # Второй цикл, тот же срез: m1 не повторяется, m2 пробуется снова.
+    assert await scheduler._handle_batch(bot, ["m1", "m2", "m3"]) is False  # type: ignore[arg-type]
+    assert handled == ["m1", "m2", "m2"]
+    # Третья неудача — сдаёмся, владелец предупреждён, срез дочитан.
+    assert await scheduler._handle_batch(bot, ["m1", "m2", "m3"]) is True  # type: ignore[arg-type]
+    assert handled == ["m1", "m2", "m2", "m2", "m3"]
+    assert any("m2" in m["text"] for m in bot.messages)
+    scheduler._handled.clear()
+    scheduler._attempts.clear()
+
+
+class _FakeMail:
+    def __init__(self, headers: Any) -> None:
+        self.headers = headers
+        self.fetches: list[bool] = []
+
+    async def get_message(self, message_id: str, *, full: bool = True, **kwargs: Any) -> Any:
+        self.fetches.append(full)
+        return self.headers
+
+    async def download_attachment(self, *args: Any, **kwargs: Any) -> bytes | None:
+        return None
+
+
+@needs_db
+async def test_incoming_reply_is_shown_escaped_and_recorded_once(
+    db: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Стык почта → база → Telegram: ответ привязывается по Message-ID,
+    показывается экранированным, пишется один раз даже при повторе среза."""
+    from bot import scheduler
+    from bot.db.repo import SupplierInput
+    from bot.services.mail import ReplyHeaders
+
+    async with db() as session:
+        request = await repo.create_request(session, product="Т", raw_input="", input_kind="text")
+        ids = await repo.upsert_suppliers(
+            session, [SupplierInput(name="ООО Медтех", domain="m.ru", email="s@m.ru")]
+        )
+        quote = await repo.reserve_quote(
+            session, request_id=int(request.id), supplier_id=ids["m.ru"], message_id="<our@m>"
+        )
+        assert quote is not None
+        await repo.mark_quote_sent(session, int(quote.id), gmail_thread="t1")
+        await session.commit()
+        quote_id = int(quote.id)
+
+    body = "Иван <ivan@m.ru> писал(а): цена 100"
+    headers = ReplyHeaders(
+        gmail_id="g1",
+        thread_id="t1",
+        subject="Re: [RFQ] x",
+        from_email="s@m.ru",
+        message_ids=["<our@m>"],
+        body=body,
+    )
+    mail = _FakeMail(headers)
+    monkeypatch.setattr(scheduler, "get_mail_service", lambda: mail)
+    offered: list[int] = []
+
+    async def fake_offer(bot: Any, chat_id: int, *, quote_id: int, **kwargs: Any) -> None:
+        offered.append(quote_id)
+
+    monkeypatch.setattr(scheduler, "offer_kp", fake_offer)
+    bot = _FakeBot()
+
+    await scheduler._handle_incoming(bot, "g1")  # type: ignore[arg-type]
+
+    assert mail.fetches == [False, True], "сначала заголовки, тело — только для привязанного"
+    shown = [m for m in bot.messages if "&lt;ivan@m.ru&gt;" in m["text"]]
+    assert shown and shown[0]["parse_mode"] == "HTML"
+    assert offered == [quote_id]
+    async with db() as session:
+        saved = await repo.get_quote(session, quote_id)
+        assert saved is not None and saved.replied_at is not None and saved.reply_text == body
+
+    # Повтор среза после сбоя на соседнем письме: второй раз не показываем.
+    before = len(bot.messages)
+    await scheduler._handle_incoming(bot, "g1")  # type: ignore[arg-type]
+    assert len(bot.messages) == before
+    assert offered == [quote_id]
+
+
+# --- №7: пара занимается до отправки ---------------------------------------
+
+
+@needs_db
+async def test_quote_pair_is_reserved_before_send_and_released_on_failure(
+    db: async_sessionmaker[AsyncSession],
+) -> None:
+    import datetime as dt
+
+    from bot.db.models import QuoteRequest, QuoteStatus
+    from bot.db.repo import SupplierInput
+
+    async with db() as session:
+        request = await repo.create_request(session, product="Т", raw_input="", input_kind="text")
+        ids = await repo.upsert_suppliers(session, [SupplierInput(name="X", domain="x.ru")])
+        rid, sid = int(request.id), ids["x.ru"]
+
+        first = await repo.reserve_quote(session, request_id=rid, supplier_id=sid, message_id="<1>")
+        assert first is not None and first.status == QuoteStatus.SENDING
+        # Второе одобрение на ту же пару, пока первое ещё отправляется.
+        assert (
+            await repo.reserve_quote(session, request_id=rid, supplier_id=sid, message_id="<2>")
+            is None
+        )
+
+        # Отправка не удалась — пару можно занять снова, Message-ID новый.
+        await repo.mark_quote_failed(session, int(first.id))
+        again = await repo.reserve_quote(session, request_id=rid, supplier_id=sid, message_id="<3>")
+        assert again is not None and again.id == first.id and again.message_id == "<3>"
+
+        # Отправлено — больше никогда.
+        await repo.mark_quote_sent(session, int(again.id), gmail_thread="t")
+        assert (
+            await repo.reserve_quote(session, request_id=rid, supplier_id=sid, message_id="<4>")
+            is None
+        )
+
+        # Зависшее sending старше порога считается брошенным.
+        stale = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=repo.QUOTE_SENDING_STALE_MINUTES + 1)
+        row = await session.get(QuoteRequest, int(again.id))
+        assert row is not None
+        row.status, row.sent_at = QuoteStatus.SENDING, stale
+        await session.flush()
+        assert (
+            await repo.reserve_quote(session, request_id=rid, supplier_id=sid, message_id="<5>")
+            is not None
+        )
+
+
+# --- №15, №21: пересылка с Message-ID, заголовки до тела ---------------------
+
+
+class _RecordingClient:
+    def __init__(self, results: list[CallResult]) -> None:
+        self.results = results
+        self.calls: list[dict[str, Any]] = []
+
+    async def post(self, url: str, **kwargs: Any) -> CallResult:
+        self.calls.append({"method": "POST", "url": url, **kwargs})
+        return self.results.pop(0)
+
+    async def get(self, url: str, **kwargs: Any) -> CallResult:
+        self.calls.append({"method": "GET", "url": url, **kwargs})
+        return self.results.pop(0)
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.fixture
+def mail_service(monkeypatch: pytest.MonkeyPatch) -> Any:
+    import datetime as dt
+
+    from bot.config import get_settings
+    from bot.services.mail import MailService
+
+    settings = get_settings()
+    for name, value in (
+        ("google_client_id", "id"),
+        ("google_client_secret", "secret"),
+        ("google_refresh_token", "1//r"),
+        ("gmail_sender", "bot@example.com"),
+    ):
+        monkeypatch.setattr(settings, name, value)
+
+    def _make(results: list[CallResult]) -> tuple[MailService, _RecordingClient]:
+        service = MailService()
+        client = _RecordingClient(results)
+        service._client = client  # type: ignore[assignment]
+        service._access_token = "t"
+        service._expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)
+        return service, client
+
+    return _make
+
+
+async def test_forward_failure_checks_the_mailbox_before_giving_up(mail_service: Any) -> None:
+    service, client = mail_service(
+        [
+            CallResult(ok=False, status_code=504, error="таймаут"),
+            CallResult(ok=True, status_code=200, json={"messages": [{"id": "m1"}]}),
+            CallResult(ok=True, status_code=200, json={"threadId": "t"}),
+        ]
+    )
+    await service.forward_file(
+        to="me@x.ru", filename="f.pdf", content=b"%PDF", mime_type="application/pdf"
+    )
+    assert sum(1 for c in client.calls if c["url"].endswith("/messages/send")) == 1
+    assert "rfc822msgid:" in client.calls[1]["params"]["q"]
+
+
+async def test_send_uses_the_message_id_reserved_in_the_database(mail_service: Any) -> None:
+    service, _ = mail_service([CallResult(ok=True, status_code=200, json={"threadId": "t"})])
+    _, message_id = await service.send(
+        to="a@b.ru", token="RFQ-2026-001", subject_suffix="s", body="b", message_id="<reserved@x>"
+    )
+    assert message_id == "<reserved@x>"
+
+
+async def test_headers_are_fetched_as_metadata_and_body_as_full(mail_service: Any) -> None:
+    service, client = mail_service([CallResult(ok=True, status_code=200, json={"id": "g"})] * 2)
+    await service.get_message("g", full=False)
+    await service.get_message("g", full=True)
+    assert client.calls[0]["params"]["format"] == "metadata"
+    assert "From" in client.calls[0]["params"]["metadataHeaders"]
+    assert client.calls[1]["params"]["format"] == "full"

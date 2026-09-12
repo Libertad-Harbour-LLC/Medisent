@@ -33,6 +33,7 @@ from bot.db.models import (
     GmailState,
     Order,
     QuoteRequest,
+    QuoteStatus,
     RegistryCache,
     Request,
     RequestStatus,
@@ -500,34 +501,67 @@ async def find_quote(
     return row
 
 
-async def create_quote_request(
-    session: AsyncSession,
-    *,
-    request_id: int,
-    supplier_id: int,
-    gmail_thread: str | None,
-    message_id: str | None,
+QUOTE_SENDING_STALE_MINUTES = 15
+
+
+async def reserve_quote(
+    session: AsyncSession, *, request_id: int, supplier_id: int, message_id: str
 ) -> QuoteRequest | None:
-    stmt = (
-        pg_insert(QuoteRequest)
-        .values(
-            request_id=request_id,
-            supplier_id=supplier_id,
-            gmail_thread=gmail_thread,
-            message_id=message_id,
-            sent_at=dt.datetime.now(dt.UTC),
-            status="sent",
-        )
-        # Пара «заявка + поставщик» уникальна. Конфликт означает, что письмо
-        # этому поставщику по этой заявке уже уходило: ничего не пишем и
-        # возвращаем None, чтобы вызывающий сказал об этом владельцу.
-        .on_conflict_do_nothing(constraint="quote_requests_request_supplier_uq")
-        .returning(QuoteRequest.id)
+    """Занять пару «заявка + поставщик» **до** отправки письма.
+
+    Уникальный индекс защищает строку, а не письмо: если строка появляется
+    после ``send``, два одобрения на одну пару оба успевают отправить. Поэтому
+    строка со статусом ``sending`` и заранее известным ``Message-ID`` пишется
+    в той же транзакции, где занимается одобрение, и только потом идёт
+    отправка.
+
+    Конфликт по индексу: пара уже есть. Занять её заново можно только если
+    прошлая попытка честно провалилась (``failed``) или зависла в ``sending``
+    дольше ``QUOTE_SENDING_STALE_MINUTES`` — так падение процесса между
+    резервом и отправкой не блокирует поставщика навсегда. Отправленное и
+    отвеченное не перезанимается никогда; тогда возвращается ``None``.
+    """
+    stale = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=QUOTE_SENDING_STALE_MINUTES)
+    stmt = pg_insert(QuoteRequest).values(
+        request_id=request_id,
+        supplier_id=supplier_id,
+        message_id=message_id,
+        sent_at=dt.datetime.now(dt.UTC),
+        status=QuoteStatus.SENDING,
     )
-    new_id = await session.scalar(stmt)
-    if new_id is None:
+    reserve = stmt.on_conflict_do_update(
+        constraint="quote_requests_request_supplier_uq",
+        set_={
+            "message_id": stmt.excluded.message_id,
+            "gmail_thread": None,
+            "sent_at": stmt.excluded.sent_at,
+            "status": QuoteStatus.SENDING,
+        },
+        where=(QuoteRequest.status == QuoteStatus.FAILED)
+        | ((QuoteRequest.status == QuoteStatus.SENDING) & (QuoteRequest.sent_at < stale)),
+    ).returning(QuoteRequest.id)
+    quote_id = await session.scalar(reserve)
+    if quote_id is None:
         return None
-    return await session.get(QuoteRequest, new_id)
+    # populate_existing: строка могла уже лежать в identity map этой сессии
+    # (повторный резерв после failed) — нужны свежие поля, а не кэш.
+    return await session.get(QuoteRequest, quote_id, populate_existing=True)
+
+
+async def mark_quote_sent(session: AsyncSession, quote_id: int, *, gmail_thread: str) -> None:
+    await session.execute(
+        update(QuoteRequest)
+        .where(QuoteRequest.id == quote_id)
+        .values(status=QuoteStatus.SENT, gmail_thread=gmail_thread, sent_at=dt.datetime.now(dt.UTC))
+    )
+
+
+async def mark_quote_failed(session: AsyncSession, quote_id: int) -> None:
+    """Отправка не удалась. Пара освобождается для новой попытки, Message-ID
+    остаётся: если Gmail всё же принял письмо, ответ на него привяжется."""
+    await session.execute(
+        update(QuoteRequest).where(QuoteRequest.id == quote_id).values(status=QuoteStatus.FAILED)
+    )
 
 
 async def find_quote_by_message_id(
@@ -582,7 +616,7 @@ async def mark_quote_replied(
     values: dict[str, Any] = {
         "replied_at": dt.datetime.now(dt.UTC),
         "reply_text": reply_text,
-        "status": "replied",
+        "status": QuoteStatus.REPLIED,
     }
     if thread_id:
         values["gmail_thread"] = thread_id
@@ -615,7 +649,7 @@ async def list_silent_quotes(
                 select(QuoteRequest)
                 .where(QuoteRequest.replied_at.is_(None))
                 .where(QuoteRequest.sent_at < cutoff)
-                .where(QuoteRequest.status == "sent")
+                .where(QuoteRequest.status == QuoteStatus.SENT)
             )
         ).all()
     )

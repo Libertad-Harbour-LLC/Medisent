@@ -26,13 +26,13 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from bot import texts
 from bot.config import get_settings
 from bot.db import repo
-from bot.db.models import ApprovalDecision, ApprovalKind, RequestStatus
+from bot.db.models import ApprovalDecision, ApprovalKind, QuoteStatus, RequestStatus
 from bot.db.session import session_scope
 from bot.logging_setup import log_extra
 from bot.services import criteria as criteria_service
 from bot.services import kp
 from bot.services.gemini import GeminiError, get_gemini_service
-from bot.services.mail import MailError, get_mail_service
+from bot.services.mail import MailError, get_mail_service, new_message_id
 
 logger = logging.getLogger(__name__)
 router = Router(name="selection")
@@ -174,7 +174,9 @@ async def _prepare_email(
 
     await message.answer(texts.selection_confirmed(supplier.name), parse_mode="HTML")
 
-    if already is not None:
+    # Строка со статусом sending/failed — незавершённая попытка, её можно
+    # повторить; отправленное и отвеченное второй раз не уходит.
+    if already is not None and already.status in QuoteStatus.DELIVERED:
         await message.answer(texts.mail_already_sent(supplier.name), parse_mode="HTML")
         return
     if not settings.gmail_enabled:
@@ -228,10 +230,7 @@ async def _prepare_email(
         )
         approval_id = int(approval.id)
 
-    await message.answer(
-        texts.MAIL_DRAFT_HEADER.format(supplier=supplier.name, email=supplier.email, body=body),
-        parse_mode="HTML",
-    )
+    await message.answer(texts.mail_draft(supplier.name, supplier.email, body), parse_mode="HTML")
     await message.answer(
         texts.MAIL_CONFIRM, reply_markup=_confirm_keyboard("mail", approval_id).as_markup()
     )
@@ -244,11 +243,23 @@ async def on_mail_decision(callback: CallbackQuery) -> None:
     await callback.answer()
 
     wanted = ApprovalDecision.APPROVED if decision == "yes" else ApprovalDecision.REJECTED
+    message_id = new_message_id(get_settings().gmail_sender)
 
-    # Занимаем одобрение одним UPDATE. Второе нажатие, повторная доставка
-    # callback и просроченная кнопка получают None и ничего не отправляют.
+    # Одобрение и пара «заявка + поставщик» занимаются в одной транзакции,
+    # до всякой отправки. Второе нажатие, повторная доставка callback,
+    # просроченная кнопка и второе одобрение на ту же пару получают None —
+    # и письмо не уходит. Раньше пара записывалась после send, и уникальный
+    # индекс защищал строку, а не письмо.
+    quote = None
     async with session_scope() as session:
         approval = await repo.claim_approval(session, approval_id, decision=wanted)
+        if approval is not None and wanted == ApprovalDecision.APPROVED:
+            quote = await repo.reserve_quote(
+                session,
+                request_id=int(approval.request_id or 0),
+                supplier_id=int(approval.supplier_id or 0),
+                message_id=message_id,
+            )
 
     if approval is None:
         await _reply(callback, texts.APPROVAL_EXPIRED)
@@ -261,19 +272,20 @@ async def on_mail_decision(callback: CallbackQuery) -> None:
     request_id = int(approval.request_id or 0)
     supplier_id = int(approval.supplier_id or 0)
 
-    # Перепроверка живого состояния в момент применения: адрес поставщика мог
-    # измениться после того, как владелец увидел письмо.
-    async with session_scope() as session:
-        supplier = await repo.get_supplier(session, supplier_id)
-        already = await repo.find_quote(session, request_id, supplier_id)
-
-    if already is not None:
+    if quote is None:
         await _reply(
             callback,
             texts.mail_already_sent(str(payload.get("supplier_name", ""))),
             parse_mode="HTML",
         )
         return
+    quote_id = int(quote.id)
+
+    # Перепроверка живого состояния в момент применения: адрес поставщика мог
+    # измениться после того, как владелец увидел письмо. Адресат при этом
+    # берётся из одобрения, а не из свежей записи.
+    async with session_scope() as session:
+        supplier = await repo.get_supplier(session, supplier_id)
     if supplier is not None and (supplier.email or "") != payload.get("to"):
         logger.warning(
             "Адрес поставщика изменился после одобрения: было %s, стало %s",
@@ -281,38 +293,35 @@ async def on_mail_decision(callback: CallbackQuery) -> None:
             supplier.email,
             extra=log_extra(request_id),
         )
+        async with session_scope() as session:
+            await repo.mark_quote_failed(session, quote_id)
         await _reply(callback, texts.MAIL_RECIPIENT_CHANGED)
         return
 
     try:
-        thread_id, message_id = await get_mail_service().send(
+        thread_id, _ = await get_mail_service().send(
             to=str(payload["to"]),
             token=str(payload["token"]),
             subject_suffix=str(payload["subject_suffix"]),
             body=str(payload["body"]),
             request_id=request_id,
+            message_id=message_id,
         )
     except MailError as exc:
         logger.error("Письмо не ушло: %s", exc, extra=log_extra(request_id))
+        # Пара освобождается для новой попытки; Message-ID остаётся в строке —
+        # если Gmail всё же принял письмо, ответ на него привяжется.
+        async with session_scope() as session:
+            await repo.mark_quote_failed(session, quote_id)
         await _reply(callback, texts.ERROR_GENERIC)
         return
 
     async with session_scope() as session:
-        quote = await repo.create_quote_request(
-            session,
-            request_id=request_id,
-            supplier_id=supplier_id,
-            gmail_thread=thread_id,
-            message_id=message_id,
-        )
+        await repo.mark_quote_sent(session, quote_id, gmail_thread=thread_id)
         await repo.mark_approval_applied(
             session,
             approval_id,
-            {
-                "message_id": message_id,
-                "thread_id": thread_id,
-                "quote_id": int(quote.id) if quote else None,
-            },
+            {"message_id": message_id, "thread_id": thread_id, "quote_id": quote_id},
         )
         await repo.set_request_status(session, request_id, RequestStatus.AWAITING_REPLY)
 
@@ -322,30 +331,38 @@ async def on_mail_decision(callback: CallbackQuery) -> None:
 # --- Этап 8: КП ----------------------------------------------------------
 
 
+def _money(value: Any) -> str:
+    """``12500.5`` → ``12 500.50``: разряды пробелом, как принято в счетах."""
+    return f"{value:,.2f}".replace(",", " ")
+
+
 def render_prices_for_confirmation(extraction: kp.Extraction) -> str:
     """Показать владельцу именно те числа, которые уйдут в КП.
 
     Оговорки печатаются рядом с ценой, а не прячутся: «12 500» и
     «12 500 без НДС от 10 штук» — это разные предложения.
     """
+    # Названия позиций, оговорки и условия пришли из письма поставщика через
+    # модель — чужой текст, экранируется в texts.
     lines = [texts.KP_CONFIRM_HEADER]
     for index, item in enumerate(extraction.items, start=1):
-        caveats = "; ".join(item.caveats)
-        total = f"{item.qty:g} {item.unit} × {item.price:,.2f} = {item.total:,.2f}"
         lines.append(
-            f"{index}. <b>{item.name}</b>\n"
-            f"   {total} {extraction.currency}".replace(",", " ")
-            + (f"\n   <i>{caveats}</i>" if caveats else "")
+            texts.kp_item_line(
+                index,
+                name=item.name,
+                amount=f"{item.qty:g} {item.unit} × {_money(item.price)} = {_money(item.total)}",
+                currency=extraction.currency,
+                caveats="; ".join(item.caveats),
+            )
         )
-    lines.append(f"\n<b>Итого: {extraction.total:,.2f} {extraction.currency}</b>".replace(",", " "))
+    lines.append(texts.kp_total_line(_money(extraction.total), extraction.currency))
     if extraction.lead_time:
-        lines.append(f"Срок поставки: {extraction.lead_time}")
+        lines.append(texts.kp_lead_time_line(extraction.lead_time))
     if extraction.payment_terms:
-        lines.append(f"Оплата: {extraction.payment_terms}")
+        lines.append(texts.kp_payment_line(extraction.payment_terms))
 
     for item in extraction.suspicious_items():
-        price = f"{item.price:,.2f}".replace(",", " ")
-        lines.append("\n⚠️ " + texts.kp_price_suspicious(item.name, price))
+        lines.append("\n⚠️ " + texts.kp_price_suspicious(item.name, _money(item.price)))
 
     lines.append("\n" + texts.KP_CONFIRM_FOOTER)
     return "\n".join(lines)

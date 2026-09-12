@@ -5,6 +5,21 @@
 
 from __future__ import annotations
 
+import html
+
+
+def esc(value: object) -> str:
+    """Экранировать текст для Telegram-HTML.
+
+    Бот шлёт всё в ``parse_mode=HTML`` (умолчание в ``main.py``), а значит
+    любое ``<``, ``>`` или ``&`` в чужом тексте — название поставщика «A&D»,
+    строка ``Иван <ivan@x.ru> писал(а):`` из письма — ломает всё сообщение:
+    Telegram отвечает «can't parse entities», и владелец не получает ничего.
+    Всё, что пришло не из этого файла, проходит через ``esc``.
+    """
+    return html.escape(str(value), quote=False)
+
+
 # --- Общие ---------------------------------------------------------------
 
 START = (
@@ -45,8 +60,8 @@ INTAKE_GEMINI_OFF = (
 
 def intake_recognised(product: str, qty: str, token: str) -> str:
     return (
-        f"Изделие: <b>{product}</b>\n"
-        f"Количество: {qty}\n"
+        f"Изделие: <b>{esc(product)}</b>\n"
+        f"Количество: {esc(qty)}\n"
         f"Заявка: <code>{token}</code>\n\n"
         "Ищу поставщиков…"
     )
@@ -128,7 +143,7 @@ def selection_ambiguous(tokens: list[str]) -> str:
 
 
 def selection_confirmed(supplier: str) -> str:
-    return f"Выбран <b>{supplier}</b>. Готовлю письмо."
+    return f"Выбран <b>{esc(supplier)}</b>. Готовлю письмо."
 
 
 def criteria_saved(count: int) -> str:
@@ -140,7 +155,12 @@ INFO_REQUEST_RUNNING = "Собираю дополнительную информ
 # --- Этап 7: письмо и ответ ---------------------------------------------
 
 MAIL_OFF = "Отправка писем выключена: Gmail не настроен."
-MAIL_DRAFT_HEADER = "Письмо поставщику <b>{supplier}</b> на {email}:\n\n{body}"
+
+
+def mail_draft(supplier: str, email: str, body: str) -> str:
+    return f"Письмо поставщику <b>{esc(supplier)}</b> на {esc(email)}:\n\n{esc(body)}"
+
+
 MAIL_CONFIRM = "Отправляем?"
 MAIL_SENT = "Письмо отправлено. Жду ответа."
 
@@ -154,7 +174,8 @@ APPROVAL_EXPIRED = (
 
 def mail_already_sent(supplier: str) -> str:
     return (
-        f"Письмо в <b>{supplier}</b> по этой заявке уже отправлялось. " "Второй раз не отправляю."
+        f"Письмо в <b>{esc(supplier)}</b> по этой заявке уже отправлялось. "
+        "Второй раз не отправляю."
     )
 
 
@@ -166,10 +187,23 @@ MAIL_CANCELLED = "Письмо не отправлено."
 
 
 def reply_received(supplier: str, token: str) -> str:
-    return f"<b>Ответил {supplier}</b> по заявке <code>{token}</code>:"
+    return f"<b>Ответил {esc(supplier)}</b> по заявке <code>{esc(token)}</code>:"
 
 
 REPLY_ATTACHMENTS = "Вложения из письма:"
+
+
+def reply_processing_failed(gmail_id: str) -> str:
+    """Письмо не удалось обработать трижды — молчать об этом нельзя."""
+    return (
+        f"⚠️ Входящее письмо (id {esc(gmail_id)}) не удалось обработать после трёх попыток. "
+        "Посмотрите его в почте вручную; подробности в логе."
+    )
+
+
+REPLY_TAIL_FAILED = (
+    "⚠️ Текст письма показал, а вложения или разбор цен не удались. Подробности в логе."
+)
 
 # --- Этап 8: КП ----------------------------------------------------------
 
@@ -199,9 +233,26 @@ KP_ASSETS_MISSING = (
 KP_VALID_UNTIL_DEFAULT = "Срок действия в письме не указан — поставил {date} (сегодня + 14 дней)."
 
 
+def kp_item_line(index: int, *, name: str, amount: str, currency: str, caveats: str) -> str:
+    line = f"{index}. <b>{esc(name)}</b>\n   {esc(amount)} {esc(currency)}"
+    return line + (f"\n   <i>{esc(caveats)}</i>" if caveats else "")
+
+
+def kp_total_line(total: str, currency: str) -> str:
+    return f"\n<b>Итого: {esc(total)} {esc(currency)}</b>"
+
+
+def kp_lead_time_line(lead_time: str) -> str:
+    return f"Срок поставки: {esc(lead_time)}"
+
+
+def kp_payment_line(payment_terms: str) -> str:
+    return f"Оплата: {esc(payment_terms)}"
+
+
 def kp_price_suspicious(item: str, price: str) -> str:
     return (
-        f"Цена по позиции «{item}» — {price}. "
+        f"Цена по позиции «{esc(item)}» — {esc(price)}. "
         "Похоже на ошибку на порядок. Проверьте, пожалуйста."
     )
 
@@ -210,7 +261,7 @@ def kp_price_suspicious(item: str, price: str) -> str:
 
 
 def stats_line(service: str, calls: int, cost: float) -> str:
-    return f"{service}: {calls} вызовов, ${cost:.4f}"
+    return f"{esc(service)}: {calls} вызовов, ${cost:.4f}"
 
 
 STATS_HEADER = "<b>Расходы за сегодня</b>\n"
@@ -229,9 +280,9 @@ SESSION_NONE = "Активной заявки нет."
 
 def session_info(token: str, product: str, status: str, created: str) -> str:
     return (
-        f"Заявка <code>{token}</code>\n"
-        f"Изделие: {product}\n"
-        f"Статус: {status}\n"
+        f"Заявка <code>{esc(token)}</code>\n"
+        f"Изделие: {esc(product)}\n"
+        f"Статус: {esc(status)}\n"
         f"Создана: {created}"
     )
 
@@ -244,11 +295,15 @@ BLACKLIST_USAGE = (
 
 
 def blacklist_added(supplier: str) -> str:
-    return f"{supplier} — в чёрном списке. В выдачу больше не попадёт."
+    return f"{esc(supplier)} — в чёрном списке. В выдачу больше не попадёт."
 
 
 def blacklist_lifted(supplier: str) -> str:
-    return f"{supplier} — снят из чёрного списка."
+    return f"{esc(supplier)} — снят из чёрного списка."
+
+
+def blacklist_line(supplier_id: int, supplier: str, reason: str, when: str) -> str:
+    return f"#{supplier_id} {esc(supplier)} — {esc(reason)} ({when})"
 
 
 CANCELLED = "Заявка отменена."

@@ -184,6 +184,12 @@ async def match_quote(session: AsyncSession, headers: ReplyHeaders) -> MatchResu
     return MatchResult(None, "none")
 
 
+def new_message_id(sender: str) -> str:
+    """Свой ``Message-ID``. Генерируется до отправки и до записи в базу:
+    по нему потом находится ответ и проверяется, ушло ли письмо после сбоя."""
+    return make_msgid(domain=sender.split("@")[-1] if "@" in sender else None)
+
+
 def build_message(
     *,
     sender: str,
@@ -192,18 +198,20 @@ def build_message(
     token: str,
     subject_suffix: str,
     body: str,
+    message_id: str | None = None,
 ) -> tuple[str, str]:
     """Собрать письмо. Возвращает ``(base64url MIME, Message-ID)``.
 
     Свой ``Message-ID`` ставится намеренно: по нему потом находится ответ, и
-    знать его надо до отправки, а не выковыривать из ответа Gmail.
+    знать его надо до отправки, а не выковыривать из ответа Gmail. Обычно он
+    уже зарезервирован в ``quote_requests`` и передаётся сюда.
     Токен в теме обязателен — это третий шаг матчинга.
     """
     message = EmailMessage()
     message["Subject"] = f"[{token}] {subject_suffix}"
     message["From"] = formataddr((sender_name, sender)) if sender_name else sender
     message["To"] = to
-    message_id = make_msgid(domain=sender.split("@")[-1] if "@" in sender else None)
+    message_id = message_id or new_message_id(sender)
     message["Message-ID"] = message_id
     message.set_content(body)
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
@@ -302,6 +310,7 @@ class MailService:
         subject_suffix: str,
         body: str,
         request_id: int | None = None,
+        message_id: str | None = None,
     ) -> tuple[str, str]:
         """Отправить письмо. Возвращает ``(threadId, Message-ID)``.
 
@@ -319,6 +328,7 @@ class MailService:
             token=token,
             subject_suffix=subject_suffix,
             body=body,
+            message_id=message_id,
         )
         result = await self._client.post(
             f"{GMAIL_BASE}/messages/send",
@@ -368,6 +378,10 @@ class MailService:
         message["Subject"] = f"Файл из Telegram: {filename}"
         message["From"] = self._settings.gmail_sender
         message["To"] = to
+        # Тот же приём, что у send: свой Message-ID до отправки, чтобы после
+        # неясного сбоя проверить ящик, а не пересылать файл второй раз.
+        message_id = new_message_id(self._settings.gmail_sender)
+        message["Message-ID"] = message_id
         message.set_content("Файл переслан ботом подбора поставщиков.")
         maintype, _, subtype = mime_type.partition("/")
         message.add_attachment(
@@ -386,6 +400,13 @@ class MailService:
             retries=0,  # отправка не идемпотентна
         )
         if not result.ok:
+            if await self.find_sent_by_message_id(message_id, request_id=request_id) is not None:
+                logger.warning(
+                    "Пересылка вернула ошибку (%s), но письмо в ящике есть — считаем ушедшим",
+                    result.error,
+                    extra=log_extra(request_id),
+                )
+                return
             raise MailError(f"файл не переслан: {result.error}")
 
     async def current_history_id(self, request_id: int | None = None) -> str | None:
@@ -451,14 +472,27 @@ class MailService:
         return message_ids, latest
 
     async def get_message(
-        self, message_id: str, *, request_id: int | None = None
+        self, message_id: str, *, request_id: int | None = None, full: bool = True
     ) -> ReplyHeaders | None:
+        """Письмо целиком (``full=True``) или только заголовки и фрагмент.
+
+        Матчингу нужны лишь заголовки и ``threadId`` — их даёт дешёвый
+        ``format=metadata``. Тело со всеми частями качается только для
+        письма, которое привязалось к заявке: в ящик приходит не только
+        почта поставщиков.
+        """
+        params: dict[str, Any] = {"format": "full"}
+        if not full:
+            params = {
+                "format": "metadata",
+                "metadataHeaders": ["From", "Subject", "In-Reply-To", "References"],
+            }
         result = await self._client.get(
             f"{GMAIL_BASE}/messages/{message_id}",
-            operation="messages.get",
+            operation="messages.get" if full else "messages.get.metadata",
             request_id=request_id,
             headers=await self._auth_headers(request_id),
-            params={"format": "full"},
+            params=params,
         )
         if not result.ok:
             logger.warning("Не удалось прочитать письмо %s: %s", message_id, result.error)

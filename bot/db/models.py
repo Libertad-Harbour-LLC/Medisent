@@ -73,10 +73,21 @@ class RequestStatus:
 
 
 class QuoteStatus:
+    """Жизненный цикл письма поставщику.
+
+    ``SENDING`` — пара занята, письмо ещё не ушло; ``FAILED`` — отправка
+    не удалась, пару можно занять снова. Остальное — как в ТЗ.
+    """
+
+    SENDING = "sending"
+    FAILED = "failed"
     SENT = "sent"
     REPLIED = "replied"
     SILENT = "silent"
     REFUSED = "refused"
+
+    # Письмо реально уходило: второе по той же паре не отправляется.
+    DELIVERED = frozenset({"sent", "replied", "silent", "refused"})
 
 
 class RegistryState:

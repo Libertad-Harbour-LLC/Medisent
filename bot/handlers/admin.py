@@ -96,7 +96,9 @@ async def cmd_blacklist(message: Message, command: CommandObject) -> None:
         lines = [texts.BLACKLIST_HEADER]
         for row in rows:
             when = row.added_at.strftime("%d.%m.%Y")
-            lines.append(f"#{row.supplier_id} {row.supplier_name} — {row.reason} ({when})")
+            lines.append(
+                texts.blacklist_line(int(row.supplier_id), str(row.supplier_name), row.reason, when)
+            )
         lines.append("\n" + texts.BLACKLIST_USAGE)
         await message.answer("\n".join(lines), parse_mode="HTML")
         return

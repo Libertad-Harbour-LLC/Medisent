@@ -11,6 +11,7 @@ import datetime as dt
 import os
 from collections.abc import AsyncIterator
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -37,6 +38,25 @@ async def session() -> AsyncIterator[AsyncSession]:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
     await engine.dispose()
+
+
+async def _sent_quote(
+    session: AsyncSession,
+    *,
+    request_id: int,
+    supplier_id: int,
+    gmail_thread: str,
+    message_id: str,
+) -> Any:
+    """Отправленное письмо, как его записывает хендлер: резерв пары до
+    отправки, потом отметка «ушло». ``None`` — пара уже занята."""
+    quote = await repo.reserve_quote(
+        session, request_id=request_id, supplier_id=supplier_id, message_id=message_id
+    )
+    if quote is None:
+        return None
+    await repo.mark_quote_sent(session, int(quote.id), gmail_thread=gmail_thread)
+    return quote
 
 
 async def _request_and_supplier(session: AsyncSession) -> tuple[int, int]:
@@ -204,7 +224,7 @@ async def test_second_quote_for_same_pair_is_refused(session: AsyncSession) -> N
     письмо уходить не должно.
     """
     request_id, supplier_id = await _request_and_supplier(session)
-    first = await repo.create_quote_request(
+    first = await _sent_quote(
         session,
         request_id=request_id,
         supplier_id=supplier_id,
@@ -212,7 +232,7 @@ async def test_second_quote_for_same_pair_is_refused(session: AsyncSession) -> N
         message_id="<a@medisent>",
     )
     await session.commit()
-    second = await repo.create_quote_request(
+    second = await _sent_quote(
         session,
         request_id=request_id,
         supplier_id=supplier_id,
@@ -229,7 +249,7 @@ async def test_find_quote_sees_the_existing_send(session: AsyncSession) -> None:
     request_id, supplier_id = await _request_and_supplier(session)
     assert await repo.find_quote(session, request_id, supplier_id) is None
 
-    await repo.create_quote_request(
+    await _sent_quote(
         session,
         request_id=request_id,
         supplier_id=supplier_id,
@@ -246,14 +266,14 @@ async def test_same_supplier_in_another_request_is_allowed(session: AsyncSession
     second = await repo.create_request(
         session, product="Термометр", raw_input="", input_kind="text"
     )
-    await repo.create_quote_request(
+    await _sent_quote(
         session,
         request_id=first_request,
         supplier_id=supplier_id,
         gmail_thread="t1",
         message_id="<a>",
     )
-    row = await repo.create_quote_request(
+    row = await _sent_quote(
         session,
         request_id=int(second.id),
         supplier_id=supplier_id,
@@ -270,7 +290,7 @@ async def test_same_supplier_in_another_request_is_allowed(session: AsyncSession
 async def test_kp_approval_is_found_for_repeat_letters(session: AsyncSession) -> None:
     """Второе письмо от того же поставщика не должно снова гонять модель."""
     request_id, supplier_id = await _request_and_supplier(session)
-    quote = await repo.create_quote_request(
+    quote = await _sent_quote(
         session,
         request_id=request_id,
         supplier_id=supplier_id,

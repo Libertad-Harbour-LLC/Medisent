@@ -213,8 +213,14 @@ def sanitise_for_model(text: str, *, source: str, max_chars: int = 20_000) -> st
 
 
 def for_owner(text: str, *, max_chars: int = 3000) -> str:
-    """Чужой текст для показа владельцу в Telegram, в явной рамке."""
+    """Чужой текст для показа владельцу в Telegram, в явной рамке.
+
+    Текст экранируется под HTML-режим бота: строка ``Иван <ivan@x.ru>
+    писал(а):`` есть почти в каждом ответе, и без экранирования Telegram
+    отвергал всё сообщение целиком — а письмо к тому моменту уже было
+    помечено обработанным и терялось.
+    """
     body = text[:max_chars]
     if len(text) > max_chars:
         body += f"\n… (обрезано, всего {len(text)} символов)"
-    return f"{texts.UNTRUSTED_OPEN}\n{body}\n{texts.UNTRUSTED_CLOSE}"
+    return f"{texts.UNTRUSTED_OPEN}\n{texts.esc(body)}\n{texts.UNTRUSTED_CLOSE}"
