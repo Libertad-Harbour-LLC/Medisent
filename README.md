@@ -17,6 +17,7 @@ Telegram-бот подбора поставщиков медицинских и�
 | [`docs/SPEC.md`](docs/SPEC.md) | Техническое задание. Единственный источник истины |
 | [`CLAUDE.md`](CLAUDE.md) | Правила проекта: что менять нельзя и почему |
 | [`docs/PLAN.md`](docs/PLAN.md) | Раскладка этапов по скиллам |
+| [`docs/AUDIT.md`](docs/AUDIT.md) | Аудит по чеклистам agents-best-practices, 11 расхождений |
 | [`docs/skills.md`](docs/skills.md) | Разбор каталога скиллов под сервисы системы |
 | [`skills/kp-builder/SKILL.md`](skills/kp-builder/SKILL.md) | Сборка КП. Его правила важнее удобства |
 
