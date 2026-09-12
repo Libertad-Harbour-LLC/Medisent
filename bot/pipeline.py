@@ -317,6 +317,11 @@ async def build_report(
         unrega_state=unrega_state,
     )
 
+    # Порядок отчёта — факт, а не деталь рендера: по нему владелец скажет
+    # «беру второго». Сохраняем, чтобы выбор считался по той же нумерации.
+    await repo.set_candidate_ranks(
+        session, {view.candidate_id: index for index, view in enumerate(ordered, start=1)}
+    )
     await repo.set_request_status(session, request_id, RequestStatus.AWAITING_CHOICE)
     return Report(
         request_token=token,

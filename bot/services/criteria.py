@@ -90,10 +90,31 @@ async def extract(
             schema=CRITERIA_SCHEMA,
             request_id=request_id,
             operation="criteria.extract",
+            # Названия кандидатов придумала модель поиска по чужим страницам.
+            untrusted=True,
         )
     except GeminiError as exc:
         logger.error("Извлечение критериев не удалось: %s", exc, extra=log_extra(request_id))
         return SelectionOutcome(transcript=transcript, failed=True)
+
+    # Любой id от модели сверяется со списком, который ей дали. Модель может
+    # вернуть номер из отчёта вместо id, чужого поставщика или того, кого
+    # чёрный список уже отсёк — ни один из них не должен стать адресатом
+    # письма или попасть в колонку с внешним ключом.
+    allowed = {c["id"] for c in candidates if isinstance(c.get("id"), int)}
+
+    def _known(value: Any, field_name: str) -> int | None:
+        number = _as_int(value)
+        if number is None or number in allowed:
+            return number
+        logger.warning(
+            "Модель вернула %s=%r, которого нет среди кандидатов %s",
+            field_name,
+            value,
+            sorted(allowed),
+            extra=log_extra(request_id),
+        )
+        return None
 
     rows = parsed.get("criteria") or []
     criteria: list[ExtractedCriterion] = []
@@ -116,14 +137,14 @@ async def extract(
                 direction=direction,
                 # Вес держим в разумных границах: модель иногда выдаёт 10.
                 weight=min(max(weight, 0.5), 2.0),
-                supplier_id=_as_int(row.get("supplier_id")),
+                supplier_id=_known(row.get("supplier_id"), "supplier_id"),
                 same_as=_as_int(row.get("same_as")),
             )
         )
 
     return SelectionOutcome(
-        chosen_supplier_id=_as_int(parsed.get("chosen_supplier_id")),
-        wants_more_info_about=_as_int(parsed.get("wants_more_info_about")),
+        chosen_supplier_id=_known(parsed.get("chosen_supplier_id"), "chosen_supplier_id"),
+        wants_more_info_about=_known(parsed.get("wants_more_info_about"), "wants_more_info_about"),
         criteria=criteria,
         transcript=transcript,
     )

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Integer, Row, cast, delete, func, select, text, update
+from sqlalchemy import Integer, Row, bindparam, cast, delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -372,9 +372,60 @@ async def list_candidates_for_report(session: AsyncSession, request_id: int) -> 
         .join(Supplier, Supplier.id == Candidate.supplier_id)
         .where(Candidate.request_id == request_id)
         .where(Candidate.supplier_id.not_in(blacklisted))
-        .order_by(Candidate.id)
+        # Порядок — тот, в котором владелец видел отчёт (``set_candidate_ranks``).
+        # «Беру второго» считается по этому порядку, и он обязан совпадать с
+        # нумерацией в сообщении, а не с порядком вставки строк.
+        .order_by(
+            func.coalesce(Candidate.raw["report"]["rank"].as_integer(), UNRANKED),
+            Candidate.id,
+        )
     )
     return list((await session.execute(stmt)).all())
+
+
+UNRANKED = 1_000_000
+
+
+async def set_candidate_ranks(session: AsyncSession, ranks: dict[int, int]) -> None:
+    """Запомнить порядок отчёта: ``{candidate_id: позиция}``.
+
+    Колонки ``candidates`` по ТЗ не расширяются, поэтому позиция лежит в
+    ``raw.report.rank``. Пишется один раз при сборке отчёта; дальше по ней
+    сортирует ``list_candidates_for_report``.
+    """
+    if not ranks:
+        return
+    patch = func.jsonb_build_object(
+        "report", func.jsonb_build_object("rank", bindparam("rank", type_=Integer))
+    )
+    # Пакетный UPDATE по первичному ключу: ORM сам добавляет ``WHERE id = :id``
+    # для каждого набора параметров, одним round-trip на всю заявку.
+    stmt = update(Candidate).values(
+        raw=func.coalesce(Candidate.raw, text("'{}'::jsonb")).op("||")(patch)
+    )
+    await session.execute(
+        stmt, [{"id": candidate_id, "rank": rank} for candidate_id, rank in ranks.items()]
+    )
+
+
+async def is_selectable_candidate(session: AsyncSession, request_id: int, supplier_id: int) -> bool:
+    """Есть ли поставщик среди кандидатов заявки и не в чёрном ли он списке.
+
+    Через это проходит id, который вернула модель по голосовому. Модель может
+    назвать номер вместо id, чужого поставщика или того, кого чёрный список
+    уже отсёк из отчёта — письмо ни одному из них уходить не должно.
+    """
+    blacklisted = (
+        select(Blacklist.supplier_id).where(Blacklist.lifted_at.is_(None)).scalar_subquery()
+    )
+    value = await session.scalar(
+        select(func.count())
+        .select_from(Candidate)
+        .where(Candidate.request_id == request_id)
+        .where(Candidate.supplier_id == supplier_id)
+        .where(Candidate.supplier_id.not_in(blacklisted))
+    )
+    return bool(value)
 
 
 async def count_blacklisted_in_request(session: AsyncSession, request_id: int) -> int:

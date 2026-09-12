@@ -152,10 +152,22 @@ async def _prepare_email(
     """Черновик письма выбранному поставщику — на подтверждение владельцу."""
     settings = get_settings()
     async with session_scope() as session:
-        supplier = await repo.get_supplier(session, supplier_id)
+        # Письмо уходит только кандидату этой заявки, и не из чёрного списка.
+        # Чёрный список отсекается в SQL до отчёта; здесь та же проверка на
+        # пути письма, потому что id пришёл от модели.
+        selectable = await repo.is_selectable_candidate(session, request_id, supplier_id)
+        supplier = await repo.get_supplier(session, supplier_id) if selectable else None
         request = await repo.get_request(session, request_id)
         already = await repo.find_quote(session, request_id, supplier_id)
 
+    if not selectable:
+        logger.warning(
+            "Выбран поставщик %s, которого нет среди кандидатов заявки",
+            supplier_id,
+            extra=log_extra(request_id),
+        )
+        await message.answer(texts.SELECTION_NOT_A_CANDIDATE)
+        return
     if supplier is None or request is None:
         await message.answer(texts.SELECTION_NOT_UNDERSTOOD)
         return

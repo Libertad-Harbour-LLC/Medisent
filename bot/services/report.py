@@ -263,7 +263,7 @@ async def rank_candidates(
         if not isinstance(row, dict):
             continue
         candidate_id = row.get("id")
-        matched = by_id.get(int(candidate_id)) if isinstance(candidate_id, int | str) else None
+        matched = by_id.get(_as_id(candidate_id)) if isinstance(candidate_id, int | str) else None
         if matched is None:
             # Модель назвала id, которого мы не давали. Игнорируем: выдуманным
             # кандидатам в отчёте не место.
@@ -274,8 +274,16 @@ async def rank_candidates(
             str(row.get("reason") or "").strip(), where="reason", request_id=request_id
         )
         concerns = row.get("concerns") or []
+        # Оговорки — такой же свободный текст модели, как и reason, и уходят
+        # владельцу как есть; запрещённая формулировка вырезается и здесь.
         matched.concerns = (
-            [str(c) for c in concerns if str(c).strip()] if isinstance(concerns, list) else []
+            [
+                scrub_conflation(str(c).strip(), where="concerns", request_id=request_id)
+                for c in concerns
+                if str(c).strip()
+            ]
+            if isinstance(concerns, list)
+            else []
         )
         seen.add(matched.candidate_id)
 
@@ -296,6 +304,15 @@ async def rank_candidates(
         [str(m) for m in missing if str(m).strip()] if isinstance(missing, list) else [],
         False,
     )
+
+
+def _as_id(value: int | str) -> int:
+    """id от модели → int. ``"cand_1"`` — не id, а выдумка: возвращаем то,
+    чего в ``by_id`` нет, и кандидат отбрасывается как неизвестный."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
 
 
 def render(report: Report) -> list[str]:

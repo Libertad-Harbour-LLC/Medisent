@@ -112,6 +112,10 @@ SELECTION_NEED_VOICE = "Жду голосовое: кого берём и поч
 SELECTION_NOT_UNDERSTOOD = (
     "Не понял, кого выбрали. Скажите номер из отчёта или название поставщика."
 )
+SELECTION_NOT_A_CANDIDATE = (
+    "Этого поставщика нет среди кандидатов заявки — письмо ему не готовлю. "
+    "Скажите номер из отчёта."
+)
 
 
 def selection_ambiguous(tokens: list[str]) -> str:

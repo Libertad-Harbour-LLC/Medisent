@@ -289,3 +289,165 @@ async def test_letters_found_are_listed_per_candidate(
     text = "\n".join(render(report))
     assert "Информационные письма: 1" in text
     assert texts.RU_NOT_FOUND in text
+
+
+# --- №2: «беру второго» считается по порядку отчёта ------------------------
+
+
+@needs_db
+async def test_report_order_is_persisted_and_drives_candidate_listing(
+    db: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Модель переставила кандидатов. Раньше отчёт нумеровал по её порядку, а
+    голосовой выбор строил список по ``ORDER BY id`` — «беру второго» уходил
+    не тому поставщику. Теперь порядок отчёта записан и задаёт выдачу."""
+    from bot import pipeline
+
+    _wire_pipeline(
+        monkeypatch,
+        registry=RegistryResult(state=RegistryState.NOT_FOUND),
+        unrega=RegistryResult(state=RegistryState.NOT_FOUND),
+    )
+
+    async def reversed_order(
+        views: list[Any], **kwargs: Any
+    ) -> tuple[list[Any], str, list[str], bool]:
+        ordered = list(reversed(views))
+        for index, view in enumerate(ordered, start=1):
+            view.rank = index
+        return ordered, "", [], False
+
+    monkeypatch.setattr(pipeline, "rank_candidates", reversed_order)
+    request_id = await _new_request(db)
+    await pipeline.run_search(request_id=request_id, product="Тонометр", requirements=[])
+
+    async with db() as session:
+        before = [
+            row.supplier_name for row in await repo.list_candidates_for_report(session, request_id)
+        ]
+        report = await pipeline.build_report(
+            session, request_id=request_id, product="Тонометр", qty="1", requirements=[]
+        )
+        await session.commit()
+        after = [
+            row.supplier_name for row in await repo.list_candidates_for_report(session, request_id)
+        ]
+
+    shown = [view.supplier_name for view in report.candidates]
+    assert before == list(reversed(shown)), "до отчёта порядок был по id"
+    assert after == shown, "после отчёта выдача идёт в том порядке, что видел владелец"
+
+
+# --- №5: id от модели сверяется с кандидатами -------------------------------
+
+
+class _FakeGemini:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+        self.calls: list[dict[str, Any]] = []
+
+    async def run_prompt_file(self, name: str, payload: Any, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append({"name": name, **kwargs})
+        return dict(self.payload)
+
+
+async def test_model_ids_outside_the_candidate_list_are_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Модель вернула номер из отчёта вместо id и чужого поставщика в критерии.
+    Ни то, ни другое не должно стать адресатом письма или значением FK."""
+    from bot.services import criteria
+
+    fake = _FakeGemini(
+        {
+            "chosen_supplier_id": 2,  # «второй», а не id
+            "wants_more_info_about": 999,
+            "criteria": [
+                {"text": "срок важнее цены", "direction": "plus", "weight": 1, "supplier_id": 2},
+                {"text": "без РУ не берём", "direction": "minus", "weight": 1, "supplier_id": 11},
+            ],
+        }
+    )
+    monkeypatch.setattr(criteria, "get_gemini_service", lambda: fake)
+    candidates = [
+        {"id": 10, "supplier": "A", "rank": 1},
+        {"id": 11, "supplier": "B", "rank": 2},
+    ]
+    outcome = await criteria.extract("беру второго", candidates=candidates, known_criteria=[])
+
+    assert outcome.chosen_supplier_id is None
+    assert outcome.wants_more_info_about is None
+    assert [c.supplier_id for c in outcome.criteria] == [None, 11]
+    assert fake.calls[0]["untrusted"] is True, "названия кандидатов — чужой текст"
+
+
+@needs_db
+async def test_blacklisted_supplier_is_not_selectable_even_if_a_candidate(
+    db: async_sessionmaker[AsyncSession],
+) -> None:
+    from bot.db.repo import CandidateInput, SupplierInput
+
+    async with db() as session:
+        request = await repo.create_request(session, product="Т", raw_input="", input_kind="text")
+        ids = await repo.upsert_suppliers(
+            session,
+            [SupplierInput(name="Свой", domain="a.ru"), SupplierInput(name="Чужой", domain="b.ru")],
+        )
+        own, other = ids["a.ru"], ids["b.ru"]
+        await repo.upsert_candidates(session, int(request.id), [CandidateInput(supplier_id=own)])
+        await session.commit()
+
+        assert await repo.is_selectable_candidate(session, int(request.id), own) is True
+        assert await repo.is_selectable_candidate(session, int(request.id), other) is False
+
+        await repo.add_to_blacklist(session, own, "сорвал поставку")
+        await session.commit()
+        assert await repo.is_selectable_candidate(session, int(request.id), own) is False
+
+
+# --- №11, №12: текст модели в concerns и странные id ------------------------
+
+
+def _views() -> list[Any]:
+    from tests.evals.test_report_evals import make_candidates
+
+    return make_candidates()
+
+
+async def test_concerns_are_scrubbed_like_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bot.services import report
+
+    fake = _FakeGemini(
+        {
+            "ranked": [
+                {
+                    "id": 1,
+                    "rank": 1,
+                    "reason": "дешевле всех",
+                    "concerns": ["Поставщик не проверен в Росздравнадзоре"],
+                }
+            ],
+            "summary": "ок",
+        }
+    )
+    monkeypatch.setattr(report, "get_gemini_service", lambda: fake)
+    ordered, *_ = await report.rank_candidates(
+        _views(), product="Т", qty="1", requirements=[], criteria=[]
+    )
+    concern = ordered[0].concerns[0]
+    assert "Росздравнадзор" not in concern
+    assert "формулировка убрана" in concern
+
+
+async def test_non_numeric_model_id_does_not_kill_the_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bot.services import report
+
+    fake = _FakeGemini({"ranked": [{"id": "cand_1", "rank": 1, "reason": "x"}], "summary": "ок"})
+    monkeypatch.setattr(report, "get_gemini_service", lambda: fake)
+    ordered, _, _, failed = await report.rank_candidates(
+        _views(), product="Т", qty="1", requirements=[], criteria=[]
+    )
+    assert failed is False
+    assert len(ordered) == 3, "все кандидаты на месте, выдуманный id просто отброшен"
