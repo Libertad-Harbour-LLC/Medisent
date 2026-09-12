@@ -134,6 +134,10 @@ class Report:
     summary: str = ""
     missing_data: list[str] = field(default_factory=list)
     llm_failed: bool = False
+    # Проверка информационных писем — одна на заявку. Пустая строка — «не
+    # применимо» (отчёт собран без конвейера); ``unavailable`` печатается
+    # отдельной строкой, чтобы молчание не читалось как «писем нет».
+    unrega_state: str = ""
 
 
 def _registry_line(view: CandidateView) -> str:
@@ -171,6 +175,7 @@ def build_payload(
     qty: str,
     requirements: list[str],
     criteria: list[dict[str, Any]],
+    unrega_state: str = "",
 ) -> dict[str, Any]:
     """JSON для модели. Больше она ничего не получает."""
     return {
@@ -178,6 +183,9 @@ def build_payload(
         "qty": qty,
         "requirements": requirements,
         "criteria": criteria,
+        # Состояние проверки писем отдельно от списка: пустой список при
+        # ``unavailable`` — это «не проверяли», а не «писем нет».
+        "unrega_state": unrega_state,
         "candidates": [
             {
                 "id": c.candidate_id,
@@ -210,6 +218,7 @@ async def rank_candidates(
     requirements: list[str],
     criteria: list[dict[str, Any]],
     request_id: int | None = None,
+    unrega_state: str = "",
 ) -> tuple[list[CandidateView], str, list[str], bool]:
     """Ранжирование моделью. Возвращает ``(кандидаты, вывод, чего не хватило, сбой)``.
 
@@ -222,7 +231,12 @@ async def rank_candidates(
         return [], "", [], False
 
     payload = build_payload(
-        candidates, product=product, qty=qty, requirements=requirements, criteria=criteria
+        candidates,
+        product=product,
+        qty=qty,
+        requirements=requirements,
+        criteria=criteria,
+        unrega_state=unrega_state,
     )
     try:
         parsed = await get_gemini_service().run_prompt_file(
@@ -294,6 +308,8 @@ def render(report: Report) -> list[str]:
 
     if report.llm_failed:
         blocks.append("⚠️ Ранжирование не сработало, порядок исходный.\n")
+    if report.unrega_state == RegistryState.UNAVAILABLE:
+        blocks.append(texts.UNREGA_UNAVAILABLE + "\n")
 
     for index, view in enumerate(report.candidates, start=1):
         lines = [f"<b>{index}. {view.supplier_name}</b>"]

@@ -58,14 +58,11 @@ async def _start_pipeline(message: Message, parsed: ProductRequest, input_kind: 
         return
 
     await message.answer(texts.SEARCH_RUNNING)
-    async with session_scope() as session:
-        summary = await run_search(
-            session,
-            request_id=request_id,
-            product=parsed.product,
-            qty=parsed.qty,
-            requirements=parsed.requirements,
-        )
+    summary = await run_search(
+        request_id=request_id,
+        product=parsed.product,
+        requirements=parsed.requirements,
+    )
 
     if summary.total_found == 0:
         await message.answer(texts.SEARCH_NOTHING)

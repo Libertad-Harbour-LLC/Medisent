@@ -360,6 +360,10 @@ async def list_candidates_for_report(session: AsyncSession, request_id: int) -> 
             Candidate.raw["scrape"]["injection_suspected"]
             .as_boolean()
             .label("injection_suspected"),
+            # Состояние проверки реестра — как его записал конвейер. Раньше
+            # отчёт восстанавливал его из колонок ru_number/ru_checked_at и
+            # «не смогли проверить» превращалось в «не нашли».
+            Candidate.raw["registry"]["state"].as_string().label("registry_state"),
             Supplier.name.label("supplier_name"),
             Supplier.domain,
             Supplier.email,

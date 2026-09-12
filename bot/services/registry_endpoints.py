@@ -174,8 +174,17 @@ def parse_elk_payload(payload: Any) -> ParseOutcome:
         return ParseOutcome([], understood=False, note=f"список пуст, но total={total}")
 
     records: list[RegistryRecord] = []
+    skipped = 0
     for row in rows:
         if not isinstance(row, dict):
+            continue
+        ru_number = _first(row, "registrationNumber", "regNumber", "number", "ruNumber")
+        product_name = _first(row, "name", "productName", "medProductName", "title")
+        if ru_number is None and product_name is None:
+            # Строка есть, но ни одно знакомое имя поля не совпало. Запись из
+            # одних None — это не «нашли», это «формат не тот»: в отчёте она
+            # стала бы «РУ не найдено» и на месяц легла бы в кэш.
+            skipped += 1
             continue
         status = _first(row, "status", "state", "statusName", "registrationStatus")
         status_text = str(status) if status is not None else None
@@ -183,9 +192,9 @@ def parse_elk_payload(payload: Any) -> ParseOutcome:
         records.append(
             RegistryRecord(
                 registry="elk",
-                ru_number=_first(row, "registrationNumber", "regNumber", "number", "ruNumber"),
+                ru_number=str(ru_number) if ru_number is not None else None,
                 holder=_first(row, "applicantName", "holder", "manufacturer", "organizationName"),
-                product_name=_first(row, "name", "productName", "medProductName", "title"),
+                product_name=str(product_name) if product_name is not None else None,
                 valid=_valid_from_status(status_text),
                 status_text=status_text,
                 card_url=ELK_CARD_URL_TEMPLATE.format(record_id=record_id) if record_id else None,
@@ -194,7 +203,16 @@ def parse_elk_payload(payload: Any) -> ParseOutcome:
         )
 
     if not records:
-        return ParseOutcome([], understood=False, note="строки есть, но ни одна не разобралась")
+        note = (
+            f"строк {skipped}, но ни в одной нет знакомых полей номера РУ или названия"
+            if skipped
+            else "строки есть, но ни одна не разобралась"
+        )
+        return ParseOutcome([], understood=False, note=note)
+    if skipped:
+        logger.warning(
+            "elk: %s строк из ответа не разобрались, разобрано %s", skipped, len(records)
+        )
     return ParseOutcome(records, understood=True)
 
 

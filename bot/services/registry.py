@@ -20,6 +20,7 @@ import asyncio
 import datetime as dt
 import hashlib
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +32,30 @@ from bot.services.http import ApiClient
 from bot.services.registry_endpoints import RegistryRecord
 
 logger = logging.getLogger(__name__)
+
+# Один опрос одного реестра: что нашли и что пошло не так.
+Outcome = tuple[list[RegistryRecord], str | None]
+
+
+def derive_state(outcomes: Sequence[Outcome]) -> str:
+    """Правило found / not_found / unavailable. Единственное место, где оно живёт.
+
+    * хоть одна запись — ``found``;
+    * записей нет, но хоть один источник не ответил или не разобрался —
+      ``unavailable``: мы не смогли проверить, а не «не нашли»;
+    * все источники ответили внятно и все сказали «нет» — ``not_found``.
+
+    Правило одно для двух реестров РУ и для писем ``unrega``: подменять
+    «не смогли проверить» на «ничего нет» запрещено везде одинаково.
+    """
+    if not outcomes:
+        # Ни одного источника не опросили — значит, не проверяли.
+        return RegistryState.UNAVAILABLE
+    if any(records for records, _ in outcomes):
+        return RegistryState.FOUND
+    if any(error for _, error in outcomes):
+        return RegistryState.UNAVAILABLE
+    return RegistryState.NOT_FOUND
 
 
 @dataclass(slots=True)
@@ -159,41 +184,52 @@ class RegistryService:
         *,
         request_id: int | None = None,
         session: Any = None,
+        cache: bool = False,
     ) -> RegistryResult:
         """Проверить изделие в обоих реестрах.
 
-        ``session`` — открытая сессия БД для кэша. Без неё проверка всё равно
-        отработает, просто без кэширования.
+        Кэш: либо ``session`` — уже открытая сессия БД (тесты), либо
+        ``cache=True`` — сервис сам открывает две короткие сессии, до и после
+        обращения к реестрам. Держать одну сессию открытой на время HTTP-вызова
+        нельзя: managed-база убивает соединения, простаивающие в транзакции.
+        Без того и другого проверка отработает, просто без кэширования.
         """
         extra = log_extra(request_id)
         key = cache_key(name, ru_number)
 
+        cached = None
         if session is not None:
             from bot.db import repo
 
             cached = await repo.get_registry_cache(session, key, self._settings.registry_cache_days)
-            if cached is not None:
-                logger.info("Реестр: ответ из кэша для «%s»", name, extra=extra)
-                payload = cached.payload
-                return RegistryResult(
-                    state=cached.state,
-                    records=[
-                        RegistryRecord(
-                            registry=r.get("registry", "?"),
-                            ru_number=r.get("ru_number"),
-                            holder=r.get("holder"),
-                            product_name=r.get("product_name"),
-                            valid=r.get("valid"),
-                            status_text=r.get("status_text"),
-                            card_url=r.get("card_url"),
-                            raw={},
-                        )
-                        for r in payload.get("records", [])
-                    ],
-                    checked_at=cached.checked_at,
-                    errors=payload.get("errors", {}),
-                    from_cache=True,
-                )
+        elif cache:
+            from bot.db import repo
+            from bot.db.session import session_scope
+
+            async with session_scope() as own:
+                cached = await repo.get_registry_cache(own, key, self._settings.registry_cache_days)
+        if cached is not None:
+            logger.info("Реестр: ответ из кэша для «%s»", name, extra=extra)
+            payload = cached.payload
+            return RegistryResult(
+                state=cached.state,
+                records=[
+                    RegistryRecord(
+                        registry=r.get("registry", "?"),
+                        ru_number=r.get("ru_number"),
+                        holder=r.get("holder"),
+                        product_name=r.get("product_name"),
+                        valid=r.get("valid"),
+                        status_text=r.get("status_text"),
+                        card_url=r.get("card_url"),
+                        raw={},
+                    )
+                    for r in payload.get("records", [])
+                ],
+                checked_at=cached.checked_at,
+                errors=payload.get("errors", {}),
+                from_cache=True,
+            )
 
         logger.info("Реестр: проверяю «%s» (РУ %s)", name, ru_number or "—", extra=extra)
 
@@ -212,17 +248,8 @@ class RegistryService:
         if mi_error:
             errors["misearch"] = mi_error
 
-        # Логика статуса. Ключевое место всего модуля.
-        if records:
-            state = RegistryState.FOUND
-        elif errors:
-            # Хоть один реестр не ответил или не разобрался, а находок нет.
-            # Сказать «не найдено» тут нельзя: мы просто не смогли проверить.
-            state = RegistryState.UNAVAILABLE
-        else:
-            # Оба реестра ответили внятно и оба сказали «нет такого».
-            state = RegistryState.NOT_FOUND
-
+        # Логика статуса — в ``derive_state``, здесь только вызов.
+        state = derive_state([(elk_records, elk_error), (mi_records, mi_error)])
         result = RegistryResult(state=state, records=records, errors=errors)
 
         if state == RegistryState.UNAVAILABLE:
@@ -232,17 +259,32 @@ class RegistryService:
 
         # Кэшируем только состоявшиеся проверки. Положить сюда unavailable
         # на 30 дней — значит месяц не проверять изделие.
-        if session is not None and state != RegistryState.UNAVAILABLE:
-            from bot.db import repo
+        if state != RegistryState.UNAVAILABLE:
+            if session is not None:
+                from bot.db import repo
 
-            await repo.put_registry_cache(session, key, state, result.as_payload())
+                await repo.put_registry_cache(session, key, state, result.as_payload())
+            elif cache:
+                from bot.db import repo
+                from bot.db.session import session_scope
+
+                async with session_scope() as own:
+                    await repo.put_registry_cache(own, key, state, result.as_payload())
 
         return result
 
     async def check_unrega(
         self, name: str, holder: str | None = None, *, request_id: int | None = None
-    ) -> list[RegistryRecord]:
-        """Информационные письма об изъятиях. Негативный сигнал, не проверка РУ."""
+    ) -> RegistryResult:
+        """Информационные письма об изъятиях. Негативный сигнал, не проверка РУ.
+
+        Возвращает тот же ``RegistryResult``, что и проверка РУ: ``found`` —
+        письма есть, ``not_found`` — их нет, ``unavailable`` — проверить не
+        удалось. Раньше два последних случая склеивались в пустой список, и
+        упавший сервис выглядел как «писем нет» — более сильное утверждение,
+        чем бот вправе сделать.
+        """
+        extra = log_extra(request_id)
         query = f"{name} {holder}".strip() if holder else name
         result = await self._client.get(
             self._settings.registry_unrega_url,
@@ -251,14 +293,25 @@ class RegistryService:
             params=endpoints.build_unrega_params(name=query),
             expect_json=False,
         )
+        records: list[RegistryRecord] = []
+        error: str | None = None
         if not result.ok:
-            logger.warning("unrega недоступен: %s", result.error, extra=log_extra(request_id))
-            return []
-        outcome = endpoints.parse_unrega_html(result.text)
-        if not outcome.understood:
-            logger.warning("unrega не разобран: %s", outcome.note, extra=log_extra(request_id))
-            return []
-        return outcome.records
+            error = result.error or "unrega недоступен"
+        else:
+            outcome = endpoints.parse_unrega_html(result.text)
+            if not outcome.understood:
+                error = f"страница unrega не разобрана: {outcome.note}"
+            else:
+                records = outcome.records
+
+        state = derive_state([(records, error)])
+        if error:
+            logger.warning("unrega: проверить «%s» не удалось — %s", name, error, extra=extra)
+        else:
+            logger.info("unrega: «%s» → %s, писем %s", name, state, len(records), extra=extra)
+        return RegistryResult(
+            state=state, records=records, errors={"unrega": error} if error else {}
+        )
 
 
 _service: RegistryService | None = None
