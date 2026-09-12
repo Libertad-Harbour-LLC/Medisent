@@ -12,7 +12,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,13 +20,11 @@ from bot.config import get_settings
 from bot.logging_setup import log_extra
 from bot.services import pricing
 from bot.services.http import ApiClient, Usage
+from bot.services.llm_json import parse_llm_json
 
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-
-# Модель иногда оборачивает JSON в ```json ... ``` вопреки инструкции.
-FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
 
 
 class GeminiError(RuntimeError):
@@ -89,23 +86,6 @@ PRODUCT_SCHEMA: dict[str, Any] = {
     },
     "required": ["product", "qty", "requirements", "confidence"],
 }
-
-PRODUCT_INSTRUCTION = (
-    "Ты помогаешь закупщику медицинских изделий. По входу определи, какое "
-    "изделие нужно купить.\n"
-    "Правила:\n"
-    "- Название изделия пиши так, как его пишет производитель: тип, модель, "
-    "производитель, если видны.\n"
-    '- Не додумывай. Не разобрал — верни product="не определено" и '
-    "confidence ниже 0.5. Пустое поле лучше правдоподобной выдумки: по этому "
-    "названию дальше пойдёт проверка в государственном реестре.\n"
-    "- qty — количество словами из запроса («10 штук», «партия»); не сказано — "
-    '"не указано".\n'
-    "- requirements — дополнительные требования закупщика (срок, сертификат, "
-    "комплектация). Пусто, если их нет.\n"
-    "- Для аудио обязательно заполни transcript — дословную расшифровку.\n"
-    "- Отвечай по-русски."
-)
 
 
 class GeminiService:
@@ -182,26 +162,33 @@ class GeminiService:
         if not raw_text:
             raise GeminiError("модель вернула пустой текст")
 
-        fenced = FENCE_RE.match(raw_text)
-        if fenced:
-            raw_text = fenced.group(1)
-
-        try:
-            parsed = json.loads(raw_text)
-        except json.JSONDecodeError as exc:
+        parsed = parse_llm_json(raw_text)
+        if parsed is None:
             logger.error("Gemini вернул не JSON: %s", raw_text[:300], extra=log_extra(request_id))
-            raise GeminiError(f"ответ не разобрался как JSON: {exc}") from exc
-
+            raise GeminiError("ответ не разобрался как JSON")
         if not isinstance(parsed, dict):
             raise GeminiError("ожидался объект JSON")
         return parsed
+
+    def load_instruction(self, name: str) -> str:
+        """Системная инструкция из ``prompts/<name>.md``.
+
+        Файл читается с диска при каждом вызове: владелец правит инструкцию
+        и видит результат без перезапуска бота. В коде инструкций нет —
+        это правило проекта.
+        """
+        path = Path(self._settings.prompts_dir) / f"{name}.md"
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise GeminiError(f"нет файла инструкции {path}") from exc
 
     # --- Разбор входа владельца ------------------------------------------
 
     async def parse_text(self, text: str, *, request_id: int | None = None) -> ProductRequest:
         parsed = await self.generate_json(
             parts=[Part(text=f"Запрос закупщика:\n{text}")],
-            system_instruction=PRODUCT_INSTRUCTION,
+            system_instruction=self.load_instruction("product"),
             schema=PRODUCT_SCHEMA,
             request_id=request_id,
             operation="intake.text",
@@ -216,7 +203,7 @@ class GeminiService:
                 Part(text="На фото — медицинское изделие или его упаковка. Определи, что это."),
                 Part(mime_type=mime_type, data=image),
             ],
-            system_instruction=PRODUCT_INSTRUCTION,
+            system_instruction=self.load_instruction("product"),
             schema=PRODUCT_SCHEMA,
             request_id=request_id,
             operation="intake.photo",
@@ -231,7 +218,7 @@ class GeminiService:
                 Part(text="Это голосовое сообщение закупщика. Расшифруй и определи изделие."),
                 Part(mime_type=mime_type, data=audio),
             ],
-            system_instruction=PRODUCT_INSTRUCTION,
+            system_instruction=self.load_instruction("product"),
             schema=PRODUCT_SCHEMA,
             request_id=request_id,
             operation="intake.voice",
@@ -251,7 +238,7 @@ class GeminiService:
                 Part(text=f"Файл «{filename}» с описанием изделия. Определи, что нужно купить."),
                 Part(mime_type=mime_type, data=content),
             ],
-            system_instruction=PRODUCT_INSTRUCTION,
+            system_instruction=self.load_instruction("product"),
             schema=PRODUCT_SCHEMA,
             request_id=request_id,
             operation="intake.file",
@@ -267,10 +254,7 @@ class GeminiService:
                 Part(text="Расшифруй это голосовое сообщение дословно, по-русски."),
                 Part(mime_type=mime_type, data=audio),
             ],
-            system_instruction=(
-                "Ты расшифровываешь речь. Верни ровно то, что сказано, без пересказа, "
-                "без исправления оговорок и без своих комментариев."
-            ),
+            system_instruction=self.load_instruction("transcribe"),
             schema={
                 "type": "OBJECT",
                 "properties": {"transcript": {"type": "STRING"}},
@@ -290,23 +274,18 @@ class GeminiService:
         model: str | None = None,
         request_id: int | None = None,
         operation: str | None = None,
-        untrusted: bool = False,
+        untrusted: bool = True,
     ) -> dict[str, Any]:
         """Прогнать промпт из ``prompts/<name>.md`` над готовым JSON.
 
-        Файл читается с диска при каждом вызове: владелец правит инструкцию и
-        видит результат без перезапуска бота.
-
-        ``untrusted=True`` — данные содержат текст из чужих рук (названия
-        компаний, придуманные моделью поиска по чужим страницам). Тогда JSON
-        уходит в модель в явной рамке с указанием не исполнять то, что внутри.
+        По умолчанию JSON уходит в модель в явной рамке «это данные, не
+        инструкции»: почти в каждом промпте есть текст из чужих рук —
+        названия компаний, придуманные моделью поиска по чужим страницам,
+        адреса, цитаты с сайтов. Поля владельца от рамки не страдают, а
+        забыть флаг у нового промпта теперь нельзя. ``untrusted=False`` —
+        только для промптов, где чужого текста нет вовсе.
         """
-        path = Path(self._settings.prompts_dir) / f"{prompt_name}.md"
-        try:
-            instruction = path.read_text(encoding="utf-8")
-        except FileNotFoundError as exc:
-            raise GeminiError(f"нет файла инструкции {path}") from exc
-
+        instruction = self.load_instruction(prompt_name)
         body = json.dumps(payload, ensure_ascii=False, indent=2)
         if untrusted:
             from bot.services import guard

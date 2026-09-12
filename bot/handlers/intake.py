@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
@@ -12,6 +13,7 @@ from bot import texts
 from bot.config import get_settings
 from bot.db import repo
 from bot.db.session import session_scope
+from bot.handlers.common import download
 from bot.pipeline import build_report, close_request, run_search
 from bot.services.gemini import GeminiError, ProductRequest, get_gemini_service
 from bot.services.mail import MailError, get_mail_service
@@ -19,16 +21,6 @@ from bot.services.report import render
 
 logger = logging.getLogger(__name__)
 router = Router(name="intake")
-
-MAX_FILE_BYTES = 20 * 1024 * 1024  # предел Telegram Bot API на скачивание
-
-
-async def _download(bot: Bot, file_id: str) -> bytes | None:
-    file = await bot.get_file(file_id)
-    if file.file_size and file.file_size > MAX_FILE_BYTES:
-        return None
-    buffer = await bot.download_file(file.file_path or "")
-    return buffer.read() if buffer else None
 
 
 async def _start_pipeline(message: Message, parsed: ProductRequest, input_kind: str) -> None:
@@ -120,7 +112,7 @@ async def forward_file(message: Message, bot: Bot) -> None:
         await message.answer(texts.FORWARD_NO_FILE)
         return
 
-    content = await _download(bot, document.file_id)
+    content = await download(bot, document.file_id)
     if content is None:
         await message.answer(texts.ERROR_GENERIC)
         return
@@ -140,28 +132,48 @@ async def forward_file(message: Message, bot: Bot) -> None:
     await message.answer(texts.FORWARD_OK.format(email=settings.forward_to_email))
 
 
-@router.message(F.photo)
-async def on_photo(message: Message, bot: Bot) -> None:
+async def _intake_media(
+    message: Message,
+    bot: Bot,
+    *,
+    kind: str,
+    ack: str,
+    file_id: str | None,
+    parse: Callable[[bytes], Awaitable[ProductRequest]],
+) -> None:
+    """Общее тело для фото, голосового и файла: подтверждение → скачать →
+    распознать → конвейер. Отличаются только текст подтверждения, откуда
+    брать файл и какой разборщик звать."""
     if not get_settings().gemini_enabled:
         await message.answer(texts.INTAKE_GEMINI_OFF)
         return
-    await message.answer(texts.INTAKE_PHOTO)
-
-    photo = message.photo[-1] if message.photo else None
-    if photo is None:
+    await message.answer(ack)
+    if file_id is None:
         return
-    content = await _download(bot, photo.file_id)
+    content = await download(bot, file_id)
     if content is None:
         await message.answer(texts.ERROR_GENERIC)
         return
-
     try:
-        parsed = await get_gemini_service().parse_photo(content)
+        parsed = await parse(content)
     except GeminiError as exc:
-        logger.error("Распознавание фото не удалось: %s", exc)
+        logger.error("Распознавание (%s) не удалось: %s", kind, exc)
         await message.answer(texts.INTAKE_NOT_RECOGNISED)
         return
-    await _start_pipeline(message, parsed, "photo")
+    await _start_pipeline(message, parsed, kind)
+
+
+@router.message(F.photo)
+async def on_photo(message: Message, bot: Bot) -> None:
+    photo = message.photo[-1] if message.photo else None
+    await _intake_media(
+        message,
+        bot,
+        kind="photo",
+        ack=texts.INTAKE_PHOTO,
+        file_id=photo.file_id if photo else None,
+        parse=lambda content: get_gemini_service().parse_photo(content),
+    )
 
 
 @router.message(F.voice | F.audio)
@@ -171,56 +183,33 @@ async def on_voice(message: Message, bot: Bot) -> None:
     Голосовое в ответ на отчёт обрабатывает selection.py: он стоит раньше в
     цепочке роутеров и перехватывает сообщение, когда заявка ждёт выбора.
     """
-    if not get_settings().gemini_enabled:
-        await message.answer(texts.INTAKE_GEMINI_OFF)
-        return
-    await message.answer(texts.INTAKE_VOICE)
-
     media = message.voice or message.audio
-    if media is None:
-        return
-    content = await _download(bot, media.file_id)
-    if content is None:
-        await message.answer(texts.ERROR_GENERIC)
-        return
-
-    try:
-        parsed = await get_gemini_service().parse_voice(
-            content, mime_type=media.mime_type or "audio/ogg"
-        )
-    except GeminiError as exc:
-        logger.error("Распознавание голосового не удалось: %s", exc)
-        await message.answer(texts.INTAKE_NOT_RECOGNISED)
-        return
-    await _start_pipeline(message, parsed, "voice")
+    mime = (media.mime_type if media else None) or "audio/ogg"
+    await _intake_media(
+        message,
+        bot,
+        kind="voice",
+        ack=texts.INTAKE_VOICE,
+        file_id=media.file_id if media else None,
+        parse=lambda content: get_gemini_service().parse_voice(content, mime_type=mime),
+    )
 
 
 @router.message(F.document)
 async def on_document(message: Message, bot: Bot) -> None:
-    if not get_settings().gemini_enabled:
-        await message.answer(texts.INTAKE_GEMINI_OFF)
-        return
-    await message.answer(texts.INTAKE_FILE)
-
     document = message.document
-    if document is None:
-        return
-    content = await _download(bot, document.file_id)
-    if content is None:
-        await message.answer(texts.ERROR_GENERIC)
-        return
-
-    try:
-        parsed = await get_gemini_service().parse_document(
-            content,
-            mime_type=document.mime_type or "application/pdf",
-            filename=document.file_name or "",
-        )
-    except GeminiError as exc:
-        logger.error("Разбор файла не удался: %s", exc)
-        await message.answer(texts.INTAKE_NOT_RECOGNISED)
-        return
-    await _start_pipeline(message, parsed, "file")
+    mime = (document.mime_type if document else None) or "application/pdf"
+    filename = (document.file_name if document else None) or ""
+    await _intake_media(
+        message,
+        bot,
+        kind="file",
+        ack=texts.INTAKE_FILE,
+        file_id=document.file_id if document else None,
+        parse=lambda content: get_gemini_service().parse_document(
+            content, mime_type=mime, filename=filename
+        ),
+    )
 
 
 @router.message(F.text & ~F.text.startswith("/"))

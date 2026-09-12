@@ -32,7 +32,6 @@ from bot.db.models import (
     Criterion,
     CriterionEvent,
     GmailState,
-    Order,
     QuoteRequest,
     QuoteStatus,
     RegistryCache,
@@ -94,11 +93,6 @@ async def create_request(
 
 async def get_request(session: AsyncSession, request_id: int) -> Request | None:
     row: Request | None = await session.get(Request, request_id)
-    return row
-
-
-async def get_request_by_token(session: AsyncSession, token: str) -> Request | None:
-    row: Request | None = await session.scalar(select(Request).where(Request.token == token))
     return row
 
 
@@ -269,13 +263,6 @@ def _merge_into(bucket: dict[str, dict[str, Any]], key: str, payload: dict[str, 
 
 async def get_supplier(session: AsyncSession, supplier_id: int) -> Supplier | None:
     row: Supplier | None = await session.get(Supplier, supplier_id)
-    return row
-
-
-async def find_supplier_by_email(session: AsyncSession, email: str) -> Supplier | None:
-    row: Supplier | None = await session.scalar(
-        select(Supplier).where(func.lower(Supplier.email) == email.strip().lower()).limit(1)
-    )
     return row
 
 
@@ -454,11 +441,6 @@ async def count_blacklisted_in_request(session: AsyncSession, request_id: int) -
         .where(Candidate.supplier_id.in_(blacklisted))
     )
     return int(value or 0)
-
-
-async def get_candidate(session: AsyncSession, candidate_id: int) -> Candidate | None:
-    row: Candidate | None = await session.get(Candidate, candidate_id)
-    return row
 
 
 # --- Чёрный список -------------------------------------------------------
@@ -648,23 +630,6 @@ async def set_quote_prices(
         update(QuoteRequest)
         .where(QuoteRequest.id == quote_id)
         .values(price=price, currency=currency, lead_time=lead_time)
-    )
-
-
-async def list_silent_quotes(
-    session: AsyncSession, older_than_hours: int = 72
-) -> list[QuoteRequest]:
-    """Отправленные без ответа. Основа для follow-up."""
-    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(hours=older_than_hours)
-    return list(
-        (
-            await session.scalars(
-                select(QuoteRequest)
-                .where(QuoteRequest.replied_at.is_(None))
-                .where(QuoteRequest.sent_at < cutoff)
-                .where(QuoteRequest.status == QuoteStatus.SENT)
-            )
-        ).all()
     )
 
 
@@ -932,21 +897,6 @@ async def set_gmail_history_id(session: AsyncSession, history_id: str) -> None:
         set_={"history_id": stmt.excluded.history_id, "updated_at": func.now()},
     )
     await session.execute(stmt)
-
-
-# --- Заказы --------------------------------------------------------------
-
-
-async def list_orders_for_supplier(session: AsyncSession, supplier_id: int) -> list[Order]:
-    return list(
-        (
-            await session.scalars(
-                select(Order)
-                .where(Order.supplier_id == supplier_id)
-                .order_by(Order.ordered_at.desc())
-            )
-        ).all()
-    )
 
 
 # --- Одобрения -----------------------------------------------------------

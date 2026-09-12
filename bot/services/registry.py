@@ -79,10 +79,6 @@ class RegistryResult:
         )[0]
 
     @property
-    def found(self) -> bool:
-        return self.state == RegistryState.FOUND
-
-    @property
     def unavailable(self) -> bool:
         return self.state == RegistryState.UNAVAILABLE
 

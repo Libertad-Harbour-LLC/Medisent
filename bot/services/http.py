@@ -67,10 +67,6 @@ class CallResult:
     headers: dict[str, str] = field(default_factory=dict)
     budget_exceeded: bool = False
 
-    @property
-    def timed_out(self) -> bool:
-        return self.error is not None and "таймаут" in self.error
-
 
 # Куда писать строку расхода. По умолчанию — в базу; тесты подменяют.
 MeterFn = Callable[..., Awaitable[None]]

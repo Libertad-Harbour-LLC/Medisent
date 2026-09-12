@@ -28,6 +28,7 @@ from bot.config import get_settings
 from bot.db import repo
 from bot.db.models import ApprovalDecision, ApprovalKind, QuoteStatus, RequestStatus
 from bot.db.session import session_scope
+from bot.handlers.common import download
 from bot.logging_setup import log_extra
 from bot.services import criteria as criteria_service
 from bot.services import kp
@@ -67,6 +68,31 @@ async def _reply(callback: CallbackQuery, text: str, **kwargs: Any) -> None:
         await callback.message.answer(text, **kwargs)
 
 
+def _parse_callback(callback: CallbackQuery) -> tuple[int, str]:
+    """``<prefix>:<yes|no>:<approval_id>`` → (id одобрения, решение)."""
+    _, decision, approval_id_raw = (callback.data or "").split(":", 2)
+    wanted = ApprovalDecision.APPROVED if decision == "yes" else ApprovalDecision.REJECTED
+    return int(approval_id_raw), wanted
+
+
+async def _settled(
+    callback: CallbackQuery, approval: Any, wanted: str, *, cancelled_text: str
+) -> bool:
+    """Две ранние ветки после занятия одобрения. ``True`` — применяем.
+
+    Одно место на все виды одобрений: протокол «второе нажатие получает
+    None и ничего не делает» — свойство, которое проект бережёт больше
+    всего, и жить в двух копиях ему нельзя.
+    """
+    if approval is None:
+        await _reply(callback, texts.APPROVAL_EXPIRED)
+        return False
+    if wanted == ApprovalDecision.REJECTED:
+        await _reply(callback, cancelled_text)
+        return False
+    return True
+
+
 # --- Этап 6: голосовой выбор ---------------------------------------------
 
 
@@ -96,15 +122,14 @@ async def on_choice_voice(message: Message, bot: Bot) -> None:
     if media is None:
         return
 
-    file = await bot.get_file(media.file_id)
-    buffer = await bot.download_file(file.file_path or "")
-    if buffer is None:
+    content = await download(bot, media.file_id)
+    if content is None:
         await message.answer(texts.ERROR_GENERIC)
         return
 
     try:
         transcript = await get_gemini_service().transcribe(
-            buffer.read(), mime_type=media.mime_type or "audio/ogg", request_id=request_id
+            content, mime_type=media.mime_type or "audio/ogg", request_id=request_id
         )
     except GeminiError as exc:
         logger.error("Расшифровка не удалась: %s", exc, extra=log_extra(request_id))
@@ -183,7 +208,7 @@ async def _prepare_email(
         await message.answer(texts.MAIL_OFF)
         return
     if not supplier.email:
-        await message.answer("У поставщика нет e-mail — письмо отправить некуда.")
+        await message.answer(texts.SUPPLIER_NO_EMAIL)
         return
 
     try:
@@ -238,11 +263,8 @@ async def _prepare_email(
 
 @router.callback_query(F.data.startswith("mail:"))
 async def on_mail_decision(callback: CallbackQuery) -> None:
-    _, decision, approval_id_raw = (callback.data or "").split(":", 2)
-    approval_id = int(approval_id_raw)
+    approval_id, wanted = _parse_callback(callback)
     await callback.answer()
-
-    wanted = ApprovalDecision.APPROVED if decision == "yes" else ApprovalDecision.REJECTED
     message_id = new_message_id(get_settings().gmail_sender)
 
     # Одобрение и пара «заявка + поставщик» занимаются в одной транзакции,
@@ -261,12 +283,9 @@ async def on_mail_decision(callback: CallbackQuery) -> None:
                 message_id=message_id,
             )
 
-    if approval is None:
-        await _reply(callback, texts.APPROVAL_EXPIRED)
+    if not await _settled(callback, approval, wanted, cancelled_text=texts.MAIL_CANCELLED):
         return
-    if wanted == ApprovalDecision.REJECTED:
-        await _reply(callback, texts.MAIL_CANCELLED)
-        return
+    assert approval is not None
 
     payload = approval.payload
     request_id = int(approval.request_id or 0)
@@ -420,20 +439,14 @@ async def offer_kp(
 
 @router.callback_query(F.data.startswith("kp:"))
 async def on_kp_decision(callback: CallbackQuery) -> None:
-    _, decision, approval_id_raw = (callback.data or "").split(":", 2)
-    approval_id = int(approval_id_raw)
+    approval_id, wanted = _parse_callback(callback)
     await callback.answer()
-
-    wanted = ApprovalDecision.APPROVED if decision == "yes" else ApprovalDecision.REJECTED
     async with session_scope() as session:
         approval = await repo.claim_approval(session, approval_id, decision=wanted)
 
-    if approval is None:
-        await _reply(callback, texts.APPROVAL_EXPIRED)
+    if not await _settled(callback, approval, wanted, cancelled_text=texts.KP_CANCELLED):
         return
-    if wanted == ApprovalDecision.REJECTED:
-        await _reply(callback, texts.KP_CANCELLED)
-        return
+    assert approval is not None
 
     # Собираем из того, что владелец видел, а не из свежего разбора письма.
     extraction = kp.extraction_from_payload(approval.payload)

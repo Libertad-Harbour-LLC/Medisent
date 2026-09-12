@@ -31,8 +31,6 @@ START = (
 
 ACCESS_DENIED = "Бот работает только с владельцем."
 
-UNKNOWN_COMMAND = "Не понял команду. /help — что я умею."
-
 HELP = (
     "Что умею:\n\n"
     "• Текст, фото, голосовое или файл — начну подбор поставщиков\n"
@@ -44,6 +42,11 @@ HELP = (
 )
 
 ERROR_GENERIC = "Что-то пошло не так. Подробности в логе, заявка не потеряна."
+
+
+def started_with_warnings(warnings: list[str]) -> str:
+    return "Бот запущен. Выключено:\n" + "\n".join(f"• {esc(w)}" for w in warnings)
+
 
 # --- Этап 3: приём запроса ----------------------------------------------
 
@@ -79,8 +82,6 @@ FORWARD_OFF = "Пересылка выключена: Gmail не настрое�
 
 SEARCH_OFF = "Поиск выключен: не задан PERPLEXITY_API_KEY."
 SEARCH_RUNNING = "Ищу поставщиков…"
-SCRAPE_RUNNING = "Проверяю сайты поставщиков…"
-REGISTRY_RUNNING = "Проверяю изделие в реестрах Росздравнадзора…"
 SEARCH_NOTHING = "Поставщиков не нашёл. Попробуйте уточнить название изделия."
 
 
@@ -134,7 +135,6 @@ INJECTION_SUSPECTED = "⚠️ на сайте текст, похожий на п
 
 # --- Этап 6: выбор и критерии -------------------------------------------
 
-SELECTION_NEED_VOICE = "Жду голосовое: кого берём и почему."
 SELECTION_NOT_UNDERSTOOD = (
     "Не понял, кого выбрали. Скажите номер из отчёта или название поставщика."
 )
@@ -166,6 +166,7 @@ INFO_REQUEST_RUNNING = "Собираю дополнительную информ
 # --- Этап 7: письмо и ответ ---------------------------------------------
 
 MAIL_OFF = "Отправка писем выключена: Gmail не настроен."
+SUPPLIER_NO_EMAIL = "У поставщика нет e-mail — письмо отправить некуда."
 
 
 def mail_draft(supplier: str, email: str, body: str) -> str:
@@ -227,7 +228,6 @@ KP_CONFIRM_HEADER = (
 KP_CONFIRM_FOOTER = "Всё верно?"
 KP_BUILDING = "Собираю КП…"
 KP_DRAFT_READY = "Черновик КП готов — без печати и подписи."
-KP_FINAL_READY = "КП готово."
 KP_CANCELLED = "Сборка КП отменена."
 KP_NO_PRICES = "Цен в письме не нашёл. Соберите КП вручную или уточните у поставщика."
 
@@ -279,6 +279,10 @@ STATS_HEADER = "<b>Расходы за сегодня</b>\n"
 STATS_EMPTY = "Сегодня внешние сервисы не вызывались."
 
 
+def stats_total(total: float) -> str:
+    return f"\nВсего: ${total:.4f}"
+
+
 def budget_exceeded(spent: float, limit: float) -> str:
     return (
         f"⚠️ Дневной бюджет превышен: ${spent:.2f} из ${limit:.2f}. "
@@ -303,6 +307,11 @@ BLACKLIST_HEADER = "<b>Чёрный список</b>\n"
 BLACKLIST_USAGE = (
     "Как пользоваться: /blacklist add <id поставщика> <причина> | /blacklist lift <id>"
 )
+BLACKLIST_NOT_LISTED = "Такого в чёрном списке нет."
+
+
+def supplier_not_found(supplier_id: int) -> str:
+    return f"Поставщика #{supplier_id} нет в базе."
 
 
 def blacklist_added(supplier: str) -> str:

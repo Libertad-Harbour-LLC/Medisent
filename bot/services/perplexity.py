@@ -7,16 +7,17 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from bot.config import get_settings
 from bot.logging_setup import log_extra
 from bot.services import pricing
+from bot.services.contacts import is_contact_email
 from bot.services.domains import normalise_domain
 from bot.services.http import ApiClient
+from bot.services.llm_json import parse_llm_json
 
 logger = logging.getLogger(__name__)
 
@@ -54,17 +55,6 @@ NON_SUPPLIER_DOMAINS = frozenset(
     }
 )
 
-SEARCH_INSTRUCTION = (
-    "Ты ищешь российских поставщиков медицинских изделий. Верни только "
-    "компании, которые действительно продают указанное изделие: производители, "
-    "официальные дистрибьюторы, специализированные поставщики медтехники.\n"
-    "Не включай: маркетплейсы, агрегаторы объявлений, справочники юрлиц, "
-    "новостные сайты, форумы.\n"
-    "По каждой компании дай: название, сайт, e-mail и телефон, если они есть "
-    "в источниках. Чего в источниках нет — оставь пустым, не придумывай.\n"
-    "Ответ строго в JSON."
-)
-
 SUPPLIERS_SCHEMA_HINT = """Формат ответа (только JSON, без пояснений вокруг):
 {
   "suppliers": [
@@ -96,10 +86,6 @@ class SearchOutcome:
         return self.error is None
 
 
-EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
-
-
 def domain_of(url: str) -> str:
     """Ключ дедупликации выдачи — ровно тот же, что и у записи в базу."""
     return normalise_domain(url) or ""
@@ -128,6 +114,11 @@ class PerplexityService:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    def _instruction(self) -> str:
+        """Системная инструкция из ``prompts/search.md`` — с диска, как и остальные."""
+        path = Path(self._settings.prompts_dir) / "search.md"
+        return path.read_text(encoding="utf-8")
 
     async def find_suppliers(
         self,
@@ -158,7 +149,7 @@ class PerplexityService:
                 "messages": [
                     {
                         "role": "system",
-                        "content": SEARCH_INSTRUCTION + "\n" + SUPPLIERS_SCHEMA_HINT,
+                        "content": self._instruction() + "\n" + SUPPLIERS_SCHEMA_HINT,
                     },
                     {"role": "user", "content": query},
                 ],
@@ -198,16 +189,8 @@ def _parse_suppliers(content: str, citations: list[str]) -> list[FoundSupplier]:
     suppliers: list[FoundSupplier] = []
     seen: set[str] = set()
 
-    text = content
-    fenced = FENCE_RE.search(text)
-    if fenced:
-        text = fenced.group(1)
-
-    try:
-        parsed = json.loads(text)
-        rows = parsed.get("suppliers", []) if isinstance(parsed, dict) else []
-    except (json.JSONDecodeError, AttributeError):
-        rows = []
+    parsed = parse_llm_json(content)
+    rows = parsed.get("suppliers", []) if isinstance(parsed, dict) else []
 
     for row in rows:
         if not isinstance(row, dict):
@@ -227,7 +210,7 @@ def _parse_suppliers(content: str, citations: list[str]) -> list[FoundSupplier]:
             FoundSupplier(
                 name=name,
                 site=site,
-                email=email if EMAIL_RE.fullmatch(email) else "",
+                email=email if is_contact_email(email) else "",
                 phone=str(row.get("phone") or "").strip(),
                 note=str(row.get("note") or "").strip(),
                 source_url=site,

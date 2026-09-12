@@ -1103,3 +1103,98 @@ async def test_trigram_check_is_cached_and_events_are_batched(
         assert (total, created) == (2, 2)
         count = await session.scalar(select(func.count()).select_from(CriterionEvent))
         assert count == 2
+
+
+# --- №24–28: конвенции проекта ---------------------------------------------
+
+
+def test_every_system_instruction_lives_in_prompts_dir() -> None:
+    """Правило проекта: инструкции в prompts/*.md, не в коде. Раньше три из
+    них были строками в gemini.py и kp.py, а четвёртая — в perplexity.py."""
+    from pathlib import Path
+
+    from bot.config import get_settings
+
+    prompts = Path(get_settings().prompts_dir)
+    for name in ("product", "transcribe", "extract", "search", "report", "email", "criteria"):
+        assert (prompts / f"{name}.md").read_text(encoding="utf-8").strip(), name
+
+    for module in ("gemini", "kp", "perplexity"):
+        source = Path(f"bot/services/{module}.py").read_text(encoding="utf-8")
+        assert "_INSTRUCTION = (" not in source, f"в {module}.py осталась инструкция строкой"
+
+
+def test_handlers_keep_no_user_facing_strings() -> None:
+    """Все тексты для владельца — в bot/texts.py."""
+    import re
+    from pathlib import Path
+
+    cyrillic_literal = re.compile(r"answer\(\s*f?\"[^\"]*[А-Яа-яЁё]")
+    for path in Path("bot/handlers").glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        assert not cyrillic_literal.search(source), f"{path}: текст владельцу мимо texts.py"
+    assert not re.search(r"send_message\([^)]*\"[^\"]*[А-Яа-яЁё]", Path("bot/main.py").read_text())
+
+
+def test_llm_json_parser_handles_fences_and_prose() -> None:
+    from bot.services.llm_json import parse_llm_json
+
+    assert parse_llm_json('```json\n{"a": 1}\n```') == {"a": 1}
+    assert parse_llm_json('Вот ответ:\n```\n{"a": [1, 2]}\n```\nСпасибо.') == {"a": [1, 2]}
+    assert parse_llm_json('{"a": 1}') == {"a": 1}
+    assert parse_llm_json("не json") is None
+
+
+def test_contact_email_rule_is_shared_by_search_and_scrape() -> None:
+    from bot.services.contacts import extract_email, is_contact_email
+    from bot.services.perplexity import _parse_suppliers
+
+    assert is_contact_email("sales@medtech.ru") is True
+    assert is_contact_email("noreply@medtech.ru") is False
+    assert is_contact_email("logo@2x.png") is False
+    assert extract_email("пишите noreply@x.ru или sales@x.ru") == "sales@x.ru"
+
+    found = _parse_suppliers(
+        '{"suppliers": [{"name": "A", "site": "https://a.ru", "email": "noreply@a.ru"}]}', []
+    )
+    assert found[0].email == "", "noreply из выдачи поиска больше не становится контактом"
+
+
+async def test_prompt_payloads_are_wrapped_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Флаг untrusted нельзя забыть: рамка по умолчанию."""
+    from bot.config import get_settings
+    from bot.services import guard
+    from bot.services.gemini import GeminiService
+
+    monkeypatch.setattr(get_settings(), "gemini_api_key", "k")
+    service = GeminiService()
+    seen: dict[str, Any] = {}
+
+    async def spy(**kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(service, "generate_json", spy)
+    await service.run_prompt_file("email", {"supplier": {"name": "ООО X"}})
+    text = seen["parts"][0].text
+    assert guard.wrap_untrusted("", source="x").split("\n")[0].split("(")[0] in text
+    assert '"ООО X"' in text
+
+
+def test_dead_helpers_are_gone() -> None:
+    from bot.db import repo
+    from bot.services.http import CallResult
+    from bot.services.registry import RegistryResult
+
+    for name in (
+        "get_request_by_token",
+        "find_supplier_by_email",
+        "get_candidate",
+        "list_silent_quotes",
+        "list_orders_for_supplier",
+        "set_request_status",
+    ):
+        assert not hasattr(repo, name), name
+    assert not hasattr(CallResult, "timed_out")
+    assert not hasattr(RegistryResult, "found")
+    assert not hasattr(texts, "KP_FINAL_READY")

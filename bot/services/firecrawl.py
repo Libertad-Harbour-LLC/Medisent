@@ -19,13 +19,13 @@ from decimal import Decimal, InvalidOperation
 from bot.config import get_settings
 from bot.logging_setup import log_extra
 from bot.services import guard, pricing
+from bot.services.contacts import extract_email
 from bot.services.http import ApiClient
 
 logger = logging.getLogger(__name__)
 
 API_URL = "https://api.firecrawl.dev/v1/scrape"
 
-EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]{2,}")
 PHONE_RE = re.compile(r"(?:\+7|8)[\s\-(]*\d{3}[\s\-)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}")
 # Цена: число с необязательными разделителями тысяч и копейками, рядом рубли.
 PRICE_RE = re.compile(
@@ -41,9 +41,6 @@ OUT_OF_STOCK_MARKERS = (
     "временно отсутствует",
     "out of stock",
 )
-
-# Почтовые ящики, которые встречаются на любом сайте и поставщика не идентифицируют.
-GENERIC_EMAIL_PREFIXES = ("noreply", "no-reply", "postmaster", "abuse", "webmaster")
 
 
 @dataclass(slots=True)
@@ -80,18 +77,6 @@ def _extract_price(text: str) -> Decimal | None:
     return min(prices) if prices else None
 
 
-def _extract_email(text: str) -> str | None:
-    for match in EMAIL_RE.finditer(text):
-        candidate = match.group(0).lower()
-        local = candidate.split("@", 1)[0]
-        if any(local.startswith(prefix) for prefix in GENERIC_EMAIL_PREFIXES):
-            continue
-        if candidate.endswith((".png", ".jpg", ".svg", ".webp")):
-            continue
-        return candidate
-    return None
-
-
 def _detect_stock(text: str, product: str) -> bool | None:
     """Заявляет ли сайт наличие. ``None`` — на странице об этом ничего нет.
 
@@ -115,8 +100,8 @@ def _detect_stock(text: str, product: str) -> bool | None:
         return True
     if has_out and not has_in:
         return False
-    if has_in and has_out:
-        return None  # противоречие — честнее сказать «непонятно»
+    # Оба маркера сразу — противоречие, ни одного — молчание; и то, и другое
+    # честнее назвать «непонятно».
     return None
 
 
@@ -175,7 +160,7 @@ class FirecrawlService:
             ok=True,
             claims_stock=_detect_stock(markdown, product),
             price=_extract_price(markdown),
-            email=_extract_email(markdown),
+            email=extract_email(markdown),
             phone=(m.group(0) if (m := PHONE_RE.search(markdown)) else None),
             markdown=markdown,
             injection_suspected=screening.suspicious,

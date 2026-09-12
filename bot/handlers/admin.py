@@ -42,7 +42,7 @@ async def cmd_stats(message: Message) -> None:
     lines.extend(
         texts.stats_line(str(row.service), int(row.calls), float(row.cost)) for row in rows
     )
-    lines.append(f"\nВсего: ${float(total):.4f}")
+    lines.append(texts.stats_total(float(total)))
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
@@ -114,7 +114,7 @@ async def cmd_blacklist(message: Message, command: CommandObject) -> None:
         async with session_scope() as session:
             supplier = await repo.get_supplier(session, supplier_id)
             if supplier is None:
-                await message.answer(f"Поставщика #{supplier_id} нет в базе.")
+                await message.answer(texts.supplier_not_found(supplier_id))
                 return
             await repo.add_to_blacklist(session, supplier_id, args[2])
             name = supplier.name
@@ -134,9 +134,7 @@ async def cmd_blacklist(message: Message, command: CommandObject) -> None:
             supplier = await repo.get_supplier(session, supplier_id)
             lifted = await repo.lift_from_blacklist(session, supplier_id)
             name = supplier.name if supplier else str(supplier_id)
-        await message.answer(
-            texts.blacklist_lifted(name) if lifted else "Такого в чёрном списке нет."
-        )
+        await message.answer(texts.blacklist_lifted(name) if lifted else texts.BLACKLIST_NOT_LISTED)
         return
 
     await message.answer(texts.BLACKLIST_USAGE)

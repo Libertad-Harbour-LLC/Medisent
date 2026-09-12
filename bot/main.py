@@ -69,8 +69,7 @@ async def main() -> None:
         logger.info("Бот @%s готов", me.username)
         if warnings:
             await bot.send_message(
-                settings.telegram_owner_id,
-                "Бот запущен. Выключено:\n" + "\n".join(f"• {w}" for w in warnings),
+                settings.telegram_owner_id, texts.started_with_warnings(warnings)
             )
         else:
             await bot.send_message(settings.telegram_owner_id, texts.START)

@@ -71,22 +71,6 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
     "required": ["items", "currency"],
 }
 
-EXTRACTION_INSTRUCTION = (
-    "Ты разбираешь письмо поставщика медицинских изделий и вытаскиваешь позиции "
-    "и цены.\n\n"
-    "ГЛАВНОЕ ПРАВИЛО: цены в письмах идут с оговорками, и оговорку нельзя "
-    "терять в числе.\n"
-    '- «12 500 без НДС» → price=12500, vat_included=false, caveat="без НДС"\n'
-    '- «от 10 шт по 11 000» → price=11000, min_qty=10, caveat="цена от 10 штук"\n'
-    "- «12 500 при 100% предоплате» → price=12500, prepayment_pct=100\n"
-    "- Оговорку, которую не удалось разложить по полям, клади целиком в caveat.\n\n"
-    "Чего в письме нет — не придумывай. Нет количества — ставь qty=1 и пиши это "
-    "в caveat. Нет цены по позиции — позицию не включай вовсе.\n"
-    "Диапазон «от 10 до 12 тысяч» — бери нижнюю границу и напиши это в caveat.\n"
-    "currency: RUB, USD или EUR. Не указана явно и суммы в рублях — RUB.\n"
-    "Отвечай только JSON."
-)
-
 
 @dataclass(slots=True)
 class ExtractedItem:
@@ -183,9 +167,10 @@ async def extract_from_letter(
     safe = await guard.sanitise_for_model(combined, source="письмо поставщика")
 
     try:
-        parsed = await get_gemini_service().generate_json(
+        gemini = get_gemini_service()
+        parsed = await gemini.generate_json(
             parts=[Part(text=safe)],
-            system_instruction=EXTRACTION_INSTRUCTION,
+            system_instruction=gemini.load_instruction("extract"),
             schema=EXTRACTION_SCHEMA,
             model=get_settings().llm_email_model,
             request_id=request_id,
