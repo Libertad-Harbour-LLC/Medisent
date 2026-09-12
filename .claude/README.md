@@ -183,3 +183,137 @@ arxiv, OWASP, NIST, спецификация MCP. Единственный не�
 проверяют код вокруг модели, но не то, что `prompts/report.md` не деградировал
 после правки. Это стоит завести, когда владелец заменит заглушки промптов
 своими текстами.
+
+## Скиллы Мэтта Покока (37 штук)
+
+Инженерный и «продуктивный» набор от Matt Pocock (Total TypeScript, AI Hero): грилинг
+решений, спека → тикеты → реализация, TDD, двухосевое ревью, доменное моделирование,
+диагностика багов, генерация bash-мастеров для ручных шагов.
+
+- Источник: https://github.com/mattpocock/skills
+- Коммит `3cca18b368ae95cdbdebbff572ccafa662551015` от 2026-09-04
+- Лицензия: MIT, © 2026 Matt Pocock — текст в `LICENSE` внутри каждой папки скилла
+
+Апстрим — плагин Claude Code с раскладкой `skills/<уровень>/<имя>/`. Здесь она расплющена:
+папка скилла легла прямо в `.claude/skills/<имя>/`, как требует загрузчик. Относительные
+ссылки внутри скиллов от этого не пострадали — наружу своей папки не ведёт ни одна.
+В каждую папку добавлен `LICENSE` из корня апстрима.
+
+### Что установлено, по уровням апстрима
+
+| Уровень | Скиллы |
+|---|---|
+| `engineering` (18) | `ask-matt`, `matt-code-review`, `codebase-design`, `diagnosing-bugs`, `domain-modeling`, `grill-with-docs`, `implement`, `improve-codebase-architecture`, `prototype`, `research`, `resolving-merge-conflicts`, `setup-matt-pocock-skills`, `tdd`, `to-spec`, `to-tickets`, `triage`, `wayfinder`, `wizard` |
+| `productivity` (7) | `grill-me`, `grilling`, `handoff`, `teach`, `to-questionnaire`, `wait-what`, `writing-for-agents` |
+| `misc` (4) | `git-guardrails-claude-code`, `migrate-to-shoehorn`, `scaffold-exercises`, `setup-pre-commit` |
+| `in-progress` (8) | `claude-handoff`, `implement-spec`, `loop-me`, `retro`, `setup-ts-deep-modules`, `writing-beats`, `writing-fragments`, `writing-shape` |
+
+**Уровни — это не наша разметка, а предупреждение автора.** `in-progress/README.md`
+апстрима: «бета, в плагин и в README не входят, могут измениться или исчезнуть без
+предупреждения». `misc/README.md`: «держу под рукой, но пользуюсь редко, в плагине не
+продвигаю». То есть официальный набор автора — 25 скиллов из `engineering` и
+`productivity`; остальные 12 поставлены как есть, но опираться на них не стоит.
+
+Не перенесены: `docs/<уровень>/<имя>.md` апстрима (по одной странице-описанию на скилл,
+это витрина репозитория, из самих скиллов на них не ссылается ничто), `.agents/`
+(внутренние ADR автора про его же репозиторий), `.claude-plugin/`, `README.md`,
+`AGENTS.md`, `CONTEXT.md`, `package.json` и `scripts/`.
+
+### Правка при установке: `code-review` → `matt-code-review`
+
+Единственное отступление от апстрима. У Claude Code есть **встроенный** `/code-review`
+(ревью диффа на баги и упрощения, с `--comment` и `--fix`). Скилл с тем же именем он
+перекрывает: после установки под именем `code-review` скилл на диске лежал, а в списке
+доступных не появлялся — то есть был не активирован. Переименованы папка, поле `name` и
+четыре перекрёстные ссылки на него в `ask-matt`, `implement`, `implement-spec` и `tdd`.
+Теперь доступны оба и они не пересекаются:
+
+- `/code-review` — встроенный: корректность, упрощения, эффективность.
+- `/matt-code-review` — Покока: две независимые оси, **Standards** (соответствие
+  задокументированным стандартам репозитория плюс базовый набор code smells Фаулера) и
+  **Spec** (соответствие исходной постановке), каждая в своём субагенте, отчёты рядом и
+  без сведения в один рейтинг.
+
+При обновлении из апстрима правку придётся повторить.
+
+### Как вызываются
+
+22 скилла объявлены с `disable-model-invocation: true` — модель их сама не подхватит,
+только явный вызов слэшем: `ask-matt`, `claude-handoff`, `grill-me`, `grill-with-docs`,
+`handoff`, `implement`, `implement-spec`, `improve-codebase-architecture`, `loop-me`,
+`retro`, `setup-matt-pocock-skills`, `setup-ts-deep-modules`, `teach`, `to-questionnaire`,
+`to-spec`, `to-tickets`, `triage`, `wait-what`, `wayfinder`, `writing-beats`,
+`writing-fragments`, `writing-shape`.
+
+Остальные 15 модель может включить сама по описанию. Начинать стоит с `/ask-matt` —
+это роутер по всему набору, он подскажет, какой поток подходит под ситуацию.
+
+### Оговорки
+
+**`git-guardrails-claude-code` конфликтует с рабочим процессом этого репозитория.**
+Скилл ставит PreToolUse-хук, который блокирует `git push`, `git reset --hard`,
+`git clean -f`, `git branch -D`, `git checkout .` и `git restore .`. Если его применить
+к `.claude/settings.json`, агент в этом репозитории перестанет пушить в свою ветку.
+Сам по себе скилл ничего не делает — только по прямой команде и с вопросом «на проект
+или глобально»; но знать про это до вызова надо.
+
+**Пять скиллов завязаны на TypeScript/Node и к Python-проекту не применимы:**
+`migrate-to-shoehorn` (замена `as` в тестах на `@total-typescript/shoehorn`),
+`setup-ts-deep-modules` (dependency-cruiser поверх TS-пакетов), `setup-pre-commit`
+(Husky + lint-staged + Prettier), `scaffold-exercises` (структура упражнений курсов
+автора), `prototype` в UI-ветке. У нас Python 3.12, ruff, black, mypy и pytest.
+Здесь работают только их идеи, не команды.
+
+**Часть инженерного потока требует настройки.** `matt-code-review`, `to-spec`,
+`to-tickets`, `triage` и `wayfinder` ждут файл `docs/agents/issue-tracker.md` и сами
+отправляют к `/setup-matt-pocock-skills`, который его и создаёт (варианты: GitHub Issues
+через `gh`, GitLab через `glab`, или локальные файлы). Без этого шага они остановятся
+на первом же обращении к трекеру. Заводить трекер под Medisent — отдельное решение
+владельца, по умолчанию не сделано.
+
+**`research` — это не Perplexity.** Скилл поднимает фонового агента с веб-доступом и
+кладёт результат markdown-файлом в репозиторий. У нас для рантайма уже есть
+`perplexity-research` и `perplexity-search` (платные API бота) и `research-agent`.
+`research` Покока — про разработку, не про подбор поставщиков; путать их нельзя.
+
+**`writing-for-agents` — самый полезный здесь.** Это разбор того, как писать документы,
+которые читает агент: `CLAUDE.md`, `SKILL.md`, `AGENTS.md`. Контекстные указатели,
+две «нагрузки» (контекстная и когнитивная), информационная иерархия и прогрессивное
+раскрытие, критерии завершения шага, ведущие слова, вычистка no-op-инструкций.
+Прямо ложится на `CLAUDE.md` и `docs/` этого проекта.
+
+### Что было проверено перед установкой
+
+Прочитаны все 37 `SKILL.md` целиком плюс приложенные к ним файлы. Скан на `curl | sh`,
+`rm -rf`, base64, обращения к `~/.ssh`, `.env`, ключам и токенам, на посторонние
+инструкции — чисто. Исполняемых файлов семь, все безобидные и все запускаются только
+по прямой команде: `wizard/template.sh` (204 строки, библиотека мастера — открыть URL,
+спросить значение, дописать `.env`), `setup-ts-deep-modules/dependency-cruiser.config.cjs`,
+`diagnosing-bugs/scripts/hitl-loop.template.sh`,
+`git-guardrails-claude-code/scripts/block-dangerous-git.sh` (разобран выше) и три
+служебных скрипта апстрима, которые сюда не переносились. Сетевых вызовов в коде нет
+вовсе. Единственная запись за пределы репозитория — предложение
+`git-guardrails-claude-code` поставить хук в `~/.claude/`, и оно идёт вопросом.
+
+В каждой папке лежит ещё `agents/openai.yaml` — манифест того же скилла для агента OpenAI
+Codex: отображаемое имя, короткое описание и `allow_implicit_invocation`. Проверены все
+37, ничего кроме этих трёх полей в них нет, и `allow_implicit_invocation: false` стоит
+ровно у тех же 22 скиллов, что и `disable-model-invocation: true` в шапке `SKILL.md`.
+Claude Code эти файлы не читает; оставлены, чтобы папка совпадала с апстримом.
+
+Валидатор Skill Forge проходят все 37. Оценки от 63 до 100, медиана 85. Два CRITICAL,
+оба одинаковые и оба — придирка валидатора к имени: «Name cannot contain 'claude' or
+'anthropic'» у `claude-handoff` и `git-guardrails-claude-code`. Это правило про имена
+в публичном каталоге Anthropic, на локальную загрузку оно не влияет — оба скилла
+загружаются. Переименовывать без нужды не стали.
+
+```bash
+python3 .claude/skills/skill-forge/scripts/validate_skill.py .claude/skills/<имя>
+```
+
+### Про размер набора
+
+Скиллов в репозитории стало 120. Описание каждого попадает в контекст в начале каждой
+сессии, поэтому набор — не бесплатный: это постоянный расход токенов и внимания.
+`docs/skills.md`, раздел 13, про это предупреждает. Если что-то из 37 не пригодится —
+удалить папку, других следов скилл не оставляет.
