@@ -1,4 +1,5 @@
 ---
+name: gmail-takip-sistemi
 description: Gmail'den takip bekleyen e-postaları bulup otomatik hatırlatma ve takip planı oluşturur
 ---
 

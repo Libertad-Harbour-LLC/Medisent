@@ -1,4 +1,6 @@
 ---
+name: document-extract
+description: Extract and analyse content from scanned documents, PDFs, and document images using Sonnet sub-agents. Use when the user says "extract text from this scan", "read this PDF", "OCR this photo", "what does this document say", or attaches a scanned page, handwritten note, or document image that needs its text and structure read out.
 context: fork
 ---
 
