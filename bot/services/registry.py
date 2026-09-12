@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 class RegistryResult:
     """Итог проверки по обоим реестрам."""
 
-    state: str                                    # found | not_found | unavailable
+    state: str  # found | not_found | unavailable
     records: list[RegistryRecord] = field(default_factory=list)
     checked_at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.UTC))
     errors: dict[str, str] = field(default_factory=dict)
@@ -171,9 +171,7 @@ class RegistryService:
         if session is not None:
             from bot.db import repo
 
-            cached = await repo.get_registry_cache(
-                session, key, self._settings.registry_cache_days
-            )
+            cached = await repo.get_registry_cache(session, key, self._settings.registry_cache_days)
             if cached is not None:
                 logger.info("Реестр: ответ из кэша для «%s»", name, extra=extra)
                 payload = cached.payload
@@ -228,13 +226,9 @@ class RegistryService:
         result = RegistryResult(state=state, records=records, errors=errors)
 
         if state == RegistryState.UNAVAILABLE:
-            logger.warning(
-                "Реестр: проверить «%s» не удалось — %s", name, errors, extra=extra
-            )
+            logger.warning("Реестр: проверить «%s» не удалось — %s", name, errors, extra=extra)
         else:
-            logger.info(
-                "Реестр: «%s» → %s, записей %s", name, state, len(records), extra=extra
-            )
+            logger.info("Реестр: «%s» → %s, записей %s", name, state, len(records), extra=extra)
 
         # Кэшируем только состоявшиеся проверки. Положить сюда unavailable
         # на 30 дней — значит месяц не проверять изделие.
@@ -262,9 +256,7 @@ class RegistryService:
             return []
         outcome = endpoints.parse_unrega_html(result.text)
         if not outcome.understood:
-            logger.warning(
-                "unrega не разобран: %s", outcome.note, extra=log_extra(request_id)
-            )
+            logger.warning("unrega не разобран: %s", outcome.note, extra=log_extra(request_id))
             return []
         return outcome.records
 

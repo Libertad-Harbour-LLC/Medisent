@@ -15,8 +15,14 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "RUF"]
 ignore = [
-    "S101",  # assert — нужен в тестах
-    "E501",  # длину строки держит black
+    "S101",     # assert — нужен в тестах
+    "E501",     # длину строки держит black
+    # Проект русскоязычный: тексты для владельца, комментарии и докстроки на
+    # кириллице. Эти три правила ловят «Р похожа на P» в каждой второй строке
+    # и к качеству кода отношения не имеют.
+    "RUF001",   # неоднозначный символ в строке
+    "RUF002",   # то же в докстроке
+    "RUF003",   # то же в комментарии
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -31,8 +37,14 @@ disallow_untyped_defs = true
 plugins = []
 
 [[tool.mypy.overrides]]
-module = ["pdfplumber.*", "aiogram.*"]
+module = ["pdfplumber.*"]
 ignore_missing_imports = true
+
+# Миграции — по сути сгенерированный DDL. Конструкторы типов SQLAlchemy там
+# не типизированы, и strict на них ругается на каждый JSONB-столбец.
+[[tool.mypy.overrides]]
+module = ["bot.db.migrations.*"]
+disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

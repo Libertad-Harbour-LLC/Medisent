@@ -26,11 +26,11 @@ LLM_PRICE_FALLBACK = (Decimal("0.30"), Decimal("2.50"))
 
 # Фиксированная цена за вызов, USD.
 FLAT_PRICES: dict[str, Decimal] = {
-    "perplexity": Decimal("0.006"),   # sonar, запрос среднего размера
-    "firecrawl": Decimal("0.001"),    # один scrape
-    "gmail": Decimal("0"),            # бесплатно в пределах квоты
-    "registry": Decimal("0"),         # государственные реестры
-    "browseract": Decimal("0.02"),    # если владелец включит поиск контактов
+    "perplexity": Decimal("0.006"),  # sonar, запрос среднего размера
+    "firecrawl": Decimal("0.001"),  # один scrape
+    "gmail": Decimal("0"),  # бесплатно в пределах квоты
+    "registry": Decimal("0"),  # государственные реестры
+    "browseract": Decimal("0.02"),  # если владелец включит поиск контактов
 }
 
 

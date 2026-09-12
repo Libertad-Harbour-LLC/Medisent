@@ -33,6 +33,8 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+)
+from sqlalchemy import (
     text as sql_text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -58,6 +60,7 @@ TZDateTime = DateTime(timezone=True)
 
 # --- Статусы. Строками, как в ТЗ; CHECK не ставим, чтобы правка статуса из
 # --- Mathesar не упиралась в ограничение.
+
 
 class RequestStatus:
     SEARCH = "search"
@@ -211,9 +214,7 @@ class Order(Base):
     actual_date: Mapped[dt.date | None] = mapped_column(Date)
     rating: Mapped[int | None] = mapped_column(SmallInteger)
 
-    __table_args__ = (
-        CheckConstraint("rating BETWEEN 1 AND 5", name="rating_range"),
-    )
+    __table_args__ = (CheckConstraint("rating BETWEEN 1 AND 5", name="rating_range"),)
 
 
 class Blacklist(Base):

@@ -123,7 +123,9 @@ class Settings(BaseSettings):
         """Возвращает список предупреждений и пишет их в лог. Запуск не прерывает."""
         warnings: list[str] = []
         if not self.gemini_enabled:
-            warnings.append("GEMINI_API_KEY не задан — распознавание фото, голоса и файлов выключено")
+            warnings.append(
+                "GEMINI_API_KEY не задан — распознавание фото, голоса и файлов выключено"
+            )
         if not self.search_enabled:
             warnings.append("PERPLEXITY_API_KEY не задан — поиск поставщиков выключен")
         if not self.scrape_enabled:

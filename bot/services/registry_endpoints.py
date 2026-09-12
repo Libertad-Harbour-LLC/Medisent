@@ -62,7 +62,7 @@ NOT_FOUND_MARKERS = (
 )
 
 # Статусы действия РУ, как они пишутся в реестрах.
-VALID_STATUS_MARKERS = ("действ",)                    # «действует», «действующее»
+VALID_STATUS_MARKERS = ("действ",)  # «действует», «действующее»
 INVALID_STATUS_MARKERS = ("отмен", "аннулир", "прекращ", "приостанов", "недейств")
 
 
@@ -70,11 +70,11 @@ INVALID_STATUS_MARKERS = ("отмен", "аннулир", "прекращ", "п�
 class RegistryRecord:
     """Одна запись реестра. Про поставщиков здесь нет ничего — только изделие."""
 
-    registry: str                      # misearch | elk
+    registry: str  # misearch | elk
     ru_number: str | None = None
-    holder: str | None = None          # держатель РУ
+    holder: str | None = None  # держатель РУ
     product_name: str | None = None
-    valid: bool | None = None          # действует ли удостоверение
+    valid: bool | None = None  # действует ли удостоверение
     status_text: str | None = None
     card_url: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
@@ -247,9 +247,7 @@ class _TableRowParser(HTMLParser):
             self._cell.append(data)
 
 
-RU_NUMBER_RE = re.compile(
-    r"\b(?:ФСР|ФСЗ|РЗН)\s*[\dN№/\-\.]+(?:/\d+)?", re.IGNORECASE | re.UNICODE
-)
+RU_NUMBER_RE = re.compile(r"\b(?:ФСР|ФСЗ|РЗН)\s*[\dN№/\-\.]+(?:/\d+)?", re.IGNORECASE | re.UNICODE)
 
 # Организационно-правовые формы — по ним в строке таблицы опознаётся держатель РУ.
 ORG_FORM_RE = re.compile(
@@ -276,7 +274,7 @@ def parse_misearch_html(html: str) -> ParseOutcome:
     parser = _TableRowParser()
     try:
         parser.feed(html)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return ParseOutcome([], understood=False, note=f"HTML не разобрался: {exc}")
 
     records = [rec for row in parser.rows if (rec := _row_to_record(row)) is not None]
@@ -312,9 +310,7 @@ def _row_to_record(cells: list[str]) -> RegistryRecord | None:
         None,
     )
     candidates = [
-        cell
-        for cell in cells
-        if cell and cell != status_text and not RU_NUMBER_RE.search(cell)
+        cell for cell in cells if cell and cell != status_text and not RU_NUMBER_RE.search(cell)
     ]
     if not candidates:
         return RegistryRecord(
@@ -363,7 +359,7 @@ def parse_unrega_html(html: str) -> ParseOutcome:
     parser = _TableRowParser()
     try:
         parser.feed(html)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return ParseOutcome([], understood=False, note=f"HTML не разобрался: {exc}")
 
     records = [

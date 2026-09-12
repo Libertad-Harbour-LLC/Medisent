@@ -13,10 +13,17 @@ import pytest
 FIXTURES = Path(__file__).parent / "fixtures"
 
 # Настройки должны существовать до импорта любого модуля бота.
-os.environ.setdefault("TELEGRAM_BOT_TOKEN", "111:test-token")
-os.environ.setdefault("TELEGRAM_OWNER_ID", "42")
-os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
-os.environ.setdefault("LOG_DIR", "/tmp/medisent-test-logs")  # noqa: S108
+# setdefault мало: переменная, выставленная в пустую строку, для него уже
+# «задана», и конфиг падает с невнятной ошибкой валидации.
+def _ensure(name: str, value: str) -> None:
+    if not os.environ.get(name):
+        os.environ[name] = value
+
+
+_ensure("TELEGRAM_BOT_TOKEN", "111:test-token")
+_ensure("TELEGRAM_OWNER_ID", "42")
+_ensure("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
+_ensure("LOG_DIR", "/tmp/medisent-test-logs")  # noqa: S108
 
 
 def load_fixture(name: str) -> str:

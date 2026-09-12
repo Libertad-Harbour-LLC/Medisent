@@ -216,8 +216,17 @@ def test_misearch_blank_page_without_marker_is_not_understood() -> None:
         (None, None),
         ("Неведомый статус", None),
     ],
-    ids=["действует", "действующее", "отменено", "аннулировано", "приостановлено",
-         "прекращена", "пусто", "none", "неизвестно"],
+    ids=[
+        "действует",
+        "действующее",
+        "отменено",
+        "аннулировано",
+        "приостановлено",
+        "прекращена",
+        "пусто",
+        "none",
+        "неизвестно",
+    ],
 )
 def test_status_parsing(status: str | None, expected: bool | None) -> None:
     assert endpoints._valid_from_status(status) is expected

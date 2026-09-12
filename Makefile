@@ -19,7 +19,7 @@ downgrade:     ## Откатить последнюю миграцию
 revision:      ## Новая миграция: make revision M="что меняем"
 	docker compose run --rm bot alembic revision --autogenerate -m "$(M)"
 
-test:          ## Тесты
+test:          ## Тесты (TEST_DATABASE_URL — ОТДЕЛЬНАЯ база, схема в ней пересоздаётся)
 	pytest
 lint:          ## Линтер
 	ruff check bot tests

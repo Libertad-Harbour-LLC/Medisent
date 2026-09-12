@@ -107,7 +107,7 @@ async def _record(
                 status=status,
                 duration_ms=duration_ms,
             )
-    except Exception:  # noqa: BLE001 — учёт не важнее самого вызова
+    except Exception:
         logger.exception("Не удалось записать расход по %s", service)
 
 
@@ -188,8 +188,13 @@ class ApiClient:
                     delay = _backoff_seconds(attempt, response.headers.get("Retry-After"))
                     logger.warning(
                         "%s %s вернул %s, повтор через %.1f с (попытка %s из %s)",
-                        self.service, operation or url, status_code, delay,
-                        attempt, self.max_retries + 1, extra=extra,
+                        self.service,
+                        operation or url,
+                        status_code,
+                        delay,
+                        attempt,
+                        self.max_retries + 1,
+                        extra=extra,
                     )
                     await asyncio.sleep(delay)
                     continue
@@ -204,23 +209,40 @@ class ApiClient:
                         last_error = "ответ не является JSON"
                         logger.error(
                             "%s %s: ответ не JSON, первые 200 символов: %s",
-                            self.service, operation or url, response.text[:200], extra=extra,
+                            self.service,
+                            operation or url,
+                            response.text[:200],
+                            extra=extra,
                         )
                         break
 
                 duration = int((time.monotonic() - started) * 1000)
                 logger.info(
                     "%s %s: %s за %s мс (попыток %s)",
-                    self.service, operation or url, status_code, duration, attempt, extra=extra,
+                    self.service,
+                    operation or url,
+                    status_code,
+                    duration,
+                    attempt,
+                    extra=extra,
                 )
                 await _record(
-                    service=self.service, operation=operation, request_id=request_id,
-                    tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd,
-                    status="ok", duration_ms=duration,
+                    service=self.service,
+                    operation=operation,
+                    request_id=request_id,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    cost_usd=cost_usd,
+                    status="ok",
+                    duration_ms=duration,
                 )
                 return CallResult(
-                    ok=True, status_code=status_code, json=payload, text=response.text,
-                    duration_ms=duration, attempts=attempt,
+                    ok=True,
+                    status_code=status_code,
+                    json=payload,
+                    text=response.text,
+                    duration_ms=duration,
+                    attempts=attempt,
                     headers=dict(response.headers),
                 )
 
@@ -235,31 +257,49 @@ class ApiClient:
                 kind = "таймаут" if isinstance(exc, httpx.TimeoutException) else "обрыв соединения"
                 last_error = f"{kind}: {exc}"
                 if attempt > self.max_retries:
-                    logger.error("%s %s: %s, попытки исчерпаны",
-                                 self.service, operation or url, last_error, extra=extra)
+                    logger.error(
+                        "%s %s: %s, попытки исчерпаны",
+                        self.service,
+                        operation or url,
+                        last_error,
+                        extra=extra,
+                    )
                     break
                 delay = _backoff_seconds(attempt, None)
                 logger.warning(
                     "%s %s: %s, повтор через %.1f с (попытка %s из %s)",
-                    self.service, operation or url, last_error, delay,
-                    attempt, self.max_retries + 1, extra=extra,
+                    self.service,
+                    operation or url,
+                    last_error,
+                    delay,
+                    attempt,
+                    self.max_retries + 1,
+                    extra=extra,
                 )
                 await asyncio.sleep(delay)
 
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 last_error = f"неожиданная ошибка: {exc}"
                 logger.exception("%s %s упал", self.service, operation or url, extra=extra)
                 break
 
         duration = int((time.monotonic() - started) * 1000)
         await _record(
-            service=self.service, operation=operation, request_id=request_id,
-            tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd,
-            status="error", duration_ms=duration,
+            service=self.service,
+            operation=operation,
+            request_id=request_id,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost_usd=cost_usd,
+            status="error",
+            duration_ms=duration,
         )
         return CallResult(
-            ok=False, status_code=status_code, error=last_error or "неизвестная ошибка",
-            duration_ms=duration, attempts=attempt,
+            ok=False,
+            status_code=status_code,
+            error=last_error or "неизвестная ошибка",
+            duration_ms=duration,
+            attempts=attempt,
         )
 
     async def get(self, url: str, **kwargs: Any) -> CallResult:

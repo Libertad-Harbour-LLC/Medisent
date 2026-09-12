@@ -53,8 +53,7 @@ def intake_recognised(product: str, qty: str, token: str) -> str:
 
 
 INTAKE_NOT_RECOGNISED = (
-    "Не смог разобрать, что за изделие. Напишите название текстом — "
-    "выдумывать не буду."
+    "Не смог разобрать, что за изделие. Напишите название текстом — " "выдумывать не буду."
 )
 
 FORWARD_OK = "Файл отправлен на {email}."
@@ -144,9 +143,7 @@ KP_ASSETS_MISSING = (
     "Собираю без них. Как их подготовить — skills/kp-builder/references/stamping.md"
 )
 
-KP_VALID_UNTIL_DEFAULT = (
-    "Срок действия в письме не указан — поставил {date} (сегодня + 14 дней)."
-)
+KP_VALID_UNTIL_DEFAULT = "Срок действия в письме не указан — поставил {date} (сегодня + 14 дней)."
 
 
 def kp_price_suspicious(item: str, price: str) -> str:
@@ -157,6 +154,7 @@ def kp_price_suspicious(item: str, price: str) -> str:
 
 
 # --- Администрирование ---------------------------------------------------
+
 
 def stats_line(service: str, calls: int, cost: float) -> str:
     return f"{service}: {calls} вызовов, ${cost:.4f}"
@@ -187,7 +185,9 @@ def session_info(token: str, product: str, status: str, created: str) -> str:
 
 BLACKLIST_EMPTY = "Чёрный список пуст."
 BLACKLIST_HEADER = "<b>Чёрный список</b>\n"
-BLACKLIST_USAGE = "Как пользоваться: /blacklist add <id поставщика> <причина> | /blacklist lift <id>"
+BLACKLIST_USAGE = (
+    "Как пользоваться: /blacklist add <id поставщика> <причина> | /blacklist lift <id>"
+)
 
 
 def blacklist_added(supplier: str) -> str:

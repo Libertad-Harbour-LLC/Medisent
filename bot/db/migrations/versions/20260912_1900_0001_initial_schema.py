@@ -10,9 +10,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
-
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision: str = "0001"
 down_revision: str | None = None
@@ -24,8 +23,7 @@ def upgrade() -> None:
     # pg_trgm нужен для склейки критериев по смыслу (этап 6). На managed-базе
     # прав на CREATE EXTENSION может не быть — тогда работаем без триграмм,
     # склейка останется на точном совпадении. Миграция от этого не падает.
-    op.execute(
-        """
+    op.execute("""
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm') THEN
@@ -36,13 +34,14 @@ def upgrade() -> None:
                 END;
             END IF;
         END $$;
-        """
-    )
+        """)
 
     op.create_table(
         "requests",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("raw_input", sa.Text(), nullable=True),
         sa.Column("input_kind", sa.Text(), nullable=True),
         sa.Column("product", sa.Text(), nullable=False),
@@ -61,7 +60,9 @@ def upgrade() -> None:
         sa.Column("country", sa.Text(), nullable=True),
         sa.Column("email", sa.Text(), nullable=True),
         sa.Column("phone", sa.Text(), nullable=True),
-        sa.Column("first_seen", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "first_seen", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("found_via", sa.Text(), nullable=True),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_suppliers")),
     )
@@ -87,8 +88,9 @@ def upgrade() -> None:
         sa.Column("actual_date", sa.Date(), nullable=True),
         sa.Column("rating", sa.SmallInteger(), nullable=True),
         sa.CheckConstraint("rating BETWEEN 1 AND 5", name=op.f("ck_orders_rating_range")),
-        sa.ForeignKeyConstraint(["supplier_id"], ["suppliers.id"],
-                                name=op.f("fk_orders_supplier_id_suppliers")),
+        sa.ForeignKeyConstraint(
+            ["supplier_id"], ["suppliers.id"], name=op.f("fk_orders_supplier_id_suppliers")
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_orders")),
     )
 
@@ -107,10 +109,12 @@ def upgrade() -> None:
         sa.Column("ru_checked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("unrega_flags", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("raw", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.ForeignKeyConstraint(["request_id"], ["requests.id"],
-                                name=op.f("fk_candidates_request_id_requests")),
-        sa.ForeignKeyConstraint(["supplier_id"], ["suppliers.id"],
-                                name=op.f("fk_candidates_supplier_id_suppliers")),
+        sa.ForeignKeyConstraint(
+            ["request_id"], ["requests.id"], name=op.f("fk_candidates_request_id_requests")
+        ),
+        sa.ForeignKeyConstraint(
+            ["supplier_id"], ["suppliers.id"], name=op.f("fk_candidates_supplier_id_suppliers")
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_candidates")),
         sa.UniqueConstraint("request_id", "supplier_id", name="candidates_request_supplier_uq"),
     )
@@ -130,10 +134,12 @@ def upgrade() -> None:
         sa.Column("currency", sa.Text(), nullable=True),
         sa.Column("lead_time", sa.Text(), nullable=True),
         sa.Column("status", sa.Text(), nullable=True),
-        sa.ForeignKeyConstraint(["request_id"], ["requests.id"],
-                                name=op.f("fk_quote_requests_request_id_requests")),
-        sa.ForeignKeyConstraint(["supplier_id"], ["suppliers.id"],
-                                name=op.f("fk_quote_requests_supplier_id_suppliers")),
+        sa.ForeignKeyConstraint(
+            ["request_id"], ["requests.id"], name=op.f("fk_quote_requests_request_id_requests")
+        ),
+        sa.ForeignKeyConstraint(
+            ["supplier_id"], ["suppliers.id"], name=op.f("fk_quote_requests_supplier_id_suppliers")
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_quote_requests")),
     )
     op.create_index("ix_quote_requests_message_id", "quote_requests", ["message_id"])
@@ -144,14 +150,18 @@ def upgrade() -> None:
         "blacklist",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column("supplier_id", sa.BigInteger(), nullable=True),
-        sa.Column("added_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "added_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("reason", sa.Text(), nullable=False),
         sa.Column("order_id", sa.BigInteger(), nullable=True),
         sa.Column("lifted_at", sa.DateTime(timezone=True), nullable=True),
-        sa.ForeignKeyConstraint(["order_id"], ["orders.id"],
-                                name=op.f("fk_blacklist_order_id_orders")),
-        sa.ForeignKeyConstraint(["supplier_id"], ["suppliers.id"],
-                                name=op.f("fk_blacklist_supplier_id_suppliers")),
+        sa.ForeignKeyConstraint(
+            ["order_id"], ["orders.id"], name=op.f("fk_blacklist_order_id_orders")
+        ),
+        sa.ForeignKeyConstraint(
+            ["supplier_id"], ["suppliers.id"], name=op.f("fk_blacklist_supplier_id_suppliers")
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_blacklist")),
     )
     op.create_index("ix_blacklist_supplier_id", "blacklist", ["supplier_id"])
@@ -163,13 +173,16 @@ def upgrade() -> None:
         sa.Column("direction", sa.Text(), nullable=True),
         sa.Column("weight", sa.Float(), server_default=sa.text("1.0"), nullable=False),
         sa.Column("times_seen", sa.Integer(), server_default=sa.text("1"), nullable=False),
-        sa.Column("first_seen", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("last_seen", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "first_seen", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "last_seen", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_criteria")),
     )
     # Триграммный индекс — только если расширение поднялось выше.
-    op.execute(
-        """
+    op.execute("""
         DO $$
         BEGIN
             IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm') THEN
@@ -177,8 +190,7 @@ def upgrade() -> None:
                     ON criteria USING gin (text gin_trgm_ops);
             END IF;
         END $$;
-        """
-    )
+        """)
 
     op.create_table(
         "criteria_events",
@@ -187,20 +199,27 @@ def upgrade() -> None:
         sa.Column("request_id", sa.BigInteger(), nullable=True),
         sa.Column("supplier_id", sa.BigInteger(), nullable=True),
         sa.Column("transcript", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.ForeignKeyConstraint(["criterion_id"], ["criteria.id"],
-                                name=op.f("fk_criteria_events_criterion_id_criteria")),
-        sa.ForeignKeyConstraint(["request_id"], ["requests.id"],
-                                name=op.f("fk_criteria_events_request_id_requests")),
-        sa.ForeignKeyConstraint(["supplier_id"], ["suppliers.id"],
-                                name=op.f("fk_criteria_events_supplier_id_suppliers")),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.ForeignKeyConstraint(
+            ["criterion_id"], ["criteria.id"], name=op.f("fk_criteria_events_criterion_id_criteria")
+        ),
+        sa.ForeignKeyConstraint(
+            ["request_id"], ["requests.id"], name=op.f("fk_criteria_events_request_id_requests")
+        ),
+        sa.ForeignKeyConstraint(
+            ["supplier_id"], ["suppliers.id"], name=op.f("fk_criteria_events_supplier_id_suppliers")
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_criteria_events")),
     )
 
     op.create_table(
         "api_calls",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.Column("service", sa.Text(), nullable=False),
         sa.Column("operation", sa.Text(), nullable=True),
         sa.Column("request_id", sa.BigInteger(), nullable=True),
@@ -209,8 +228,9 @@ def upgrade() -> None:
         sa.Column("cost_usd", sa.Numeric(precision=12, scale=6), nullable=True),
         sa.Column("status", sa.Text(), nullable=True),
         sa.Column("duration_ms", sa.Integer(), nullable=True),
-        sa.ForeignKeyConstraint(["request_id"], ["requests.id"],
-                                name=op.f("fk_api_calls_request_id_requests")),
+        sa.ForeignKeyConstraint(
+            ["request_id"], ["requests.id"], name=op.f("fk_api_calls_request_id_requests")
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_api_calls")),
     )
     op.create_index("ix_api_calls_created_at", "api_calls", ["created_at"])
@@ -222,7 +242,9 @@ def upgrade() -> None:
         sa.Column("cache_key", sa.String(length=512), nullable=False),
         sa.Column("state", sa.Text(), nullable=False),
         sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("checked_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "checked_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_registry_cache")),
         sa.UniqueConstraint("cache_key", name=op.f("uq_registry_cache_cache_key")),
     )
@@ -232,7 +254,9 @@ def upgrade() -> None:
         "gmail_state",
         sa.Column("id", sa.Integer(), autoincrement=False, nullable=False),
         sa.Column("history_id", sa.Text(), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_gmail_state")),
     )
 

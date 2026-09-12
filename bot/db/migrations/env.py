@@ -6,10 +6,10 @@ import asyncio
 from logging.config import fileConfig
 from typing import Any
 
+from alembic import context
 from sqlalchemy import Connection, pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from alembic import context
 from bot.config import get_settings
 from bot.db import models  # noqa: F401  — импорт нужен, иначе autogenerate не увидит таблицы
 from bot.db.models import Base

@@ -5,7 +5,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from bot.config import get_settings
 
@@ -21,7 +26,7 @@ def get_engine() -> AsyncEngine:
             settings.database_url,
             pool_size=5,
             max_overflow=5,
-            pool_pre_ping=True,   # managed-база рвёт простаивающие соединения
+            pool_pre_ping=True,  # managed-база рвёт простаивающие соединения
             pool_recycle=1800,
             echo=False,
         )

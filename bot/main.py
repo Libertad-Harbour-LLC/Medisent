@@ -1,0 +1,90 @@
+"""Точка входа. Поднимает бота, роутеры и фоновые задачи."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+
+from bot import texts
+from bot.config import get_settings
+from bot.db.session import dispose_engine
+from bot.handlers import admin, intake, selection
+from bot.logging_setup import setup_logging
+from bot.middleware import OwnerOnlyMiddleware, ThrottleMiddleware
+from bot.scheduler import start_background_tasks, stop_background_tasks
+from bot.services.firecrawl import close_firecrawl_service
+from bot.services.gemini import close_gemini_service
+from bot.services.mail import close_mail_service
+from bot.services.perplexity import close_perplexity_service
+from bot.services.registry import close_registry_service
+
+logger = logging.getLogger(__name__)
+
+
+def build_dispatcher() -> Dispatcher:
+    settings = get_settings()
+    dispatcher = Dispatcher()
+
+    # Доступ только владельцу — до всего остального.
+    owner_only = OwnerOnlyMiddleware(settings.telegram_owner_id)
+    throttle = ThrottleMiddleware(interval=1.0)
+    for observer in (dispatcher.message, dispatcher.callback_query):
+        observer.middleware(owner_only)
+        observer.middleware(throttle)
+
+    # Порядок важен. admin ловит команды; selection перехватывает голосовое,
+    # когда заявка ждёт выбора, и пропускает дальше, когда это новая заявка;
+    # intake — всё остальное.
+    dispatcher.include_router(admin.router)
+    dispatcher.include_router(selection.router)
+    dispatcher.include_router(intake.router)
+    return dispatcher
+
+
+async def main() -> None:
+    settings = get_settings()
+    setup_logging(settings.log_level, settings.log_dir)
+
+    warnings = settings.warn_about_missing_keys()
+    logger.info("Запуск бота. Предупреждений: %s", len(warnings))
+
+    bot = Bot(
+        token=settings.telegram_bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    dispatcher = build_dispatcher()
+    tasks = start_background_tasks(bot)
+
+    try:
+        me = await bot.get_me()
+        logger.info("Бот @%s готов", me.username)
+        if warnings:
+            await bot.send_message(
+                settings.telegram_owner_id,
+                "Бот запущен. Выключено:\n" + "\n".join(f"• {w}" for w in warnings),
+            )
+        else:
+            await bot.send_message(settings.telegram_owner_id, texts.START)
+
+        await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
+    finally:
+        logger.info("Останавливаюсь")
+        await stop_background_tasks(tasks)
+        await close_registry_service()
+        await close_gemini_service()
+        await close_perplexity_service()
+        await close_firecrawl_service()
+        await close_mail_service()
+        await dispose_engine()
+        await bot.session.close()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.getLogger(__name__).info("Остановлен вручную")

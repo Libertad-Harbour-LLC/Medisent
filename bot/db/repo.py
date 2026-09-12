@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Row, delete, func, select, text, update
+from sqlalchemy import Integer, Row, cast, delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,11 +59,15 @@ async def create_request(
     одновременных запроса получат один и тот же номер.
     """
     year = dt.datetime.now(dt.UTC).year
+    # Лок снимается вместе с транзакцией; без него два одновременных запроса
+    # посчитают один и тот же номер и второй упадёт на уникальном индексе.
     await session.execute(select(func.pg_advisory_xact_lock(func.hashtext("rfq_token"))))
 
-    next_number = await session.scalar(
+    next_number: int | None = await session.scalar(
         select(
-            func.coalesce(func.max(func.split_part(Request.token, "-", 3).cast(func.Integer())), 0)
+            func.coalesce(
+                func.max(cast(func.split_part(Request.token, "-", 3), Integer)), 0
+            )
             + 1
         ).where(Request.token.like(f"RFQ-{year}-%"))
     )
@@ -82,27 +86,30 @@ async def create_request(
 
 
 async def get_request(session: AsyncSession, request_id: int) -> Request | None:
-    return await session.get(Request, request_id)
+    row: Request | None = await session.get(Request, request_id)
+    return row
 
 
 async def get_request_by_token(session: AsyncSession, token: str) -> Request | None:
-    return await session.scalar(select(Request).where(Request.token == token))
+    row: Request | None = await session.scalar(
+        select(Request).where(Request.token == token)
+    )
+    return row
 
 
 async def get_active_request(session: AsyncSession) -> Request | None:
     """Последняя незакрытая заявка. Владелец один, параллельных сессий нет."""
-    return await session.scalar(
+    row: Request | None = await session.scalar(
         select(Request)
         .where(Request.status != RequestStatus.CLOSED)
         .order_by(Request.created_at.desc())
         .limit(1)
     )
+    return row
 
 
 async def set_request_status(session: AsyncSession, request_id: int, status: str) -> None:
-    await session.execute(
-        update(Request).where(Request.id == request_id).values(status=status)
-    )
+    await session.execute(update(Request).where(Request.id == request_id).values(status=status))
 
 
 # --- Поставщики ----------------------------------------------------------
@@ -148,9 +155,7 @@ def normalise_tax_id(value: str | None) -> str | None:
     return digits if len(digits) in (10, 12) else None
 
 
-async def upsert_suppliers(
-    session: AsyncSession, suppliers: list[SupplierInput]
-) -> dict[str, int]:
+async def upsert_suppliers(session: AsyncSession, suppliers: list[SupplierInput]) -> dict[str, int]:
     """Пакетно пишет поставщиков и возвращает ``{ключ: id}``.
 
     Ключ — нормализованный домен, иначе ИНН, иначе ``name``. Записи делятся на
@@ -198,41 +203,43 @@ async def upsert_suppliers(
         }
 
     if by_domain:
-        stmt = pg_insert(Supplier).values(by_domain)
-        stmt = stmt.on_conflict_do_update(
+        base = pg_insert(Supplier).values(by_domain)
+        stmt_domain = base.on_conflict_do_update(
             index_elements=[func.lower(Supplier.domain)],
             index_where=text("domain IS NOT NULL"),
-            set_=_update_set(stmt),
+            set_=_update_set(base),
         ).returning(Supplier.id, Supplier.domain)
-        for row in (await session.execute(stmt)).all():
-            result[str(row.domain)] = int(row.id)
+        for domain_row in (await session.execute(stmt_domain)).all():
+            result[str(domain_row.domain)] = int(domain_row.id)
 
     if by_tax:
-        stmt = pg_insert(Supplier).values(by_tax)
-        stmt = stmt.on_conflict_do_update(
+        base = pg_insert(Supplier).values(by_tax)
+        stmt_tax = base.on_conflict_do_update(
             index_elements=[Supplier.tax_id],
             index_where=text("tax_id IS NOT NULL"),
-            set_=_update_set(stmt),
+            set_=_update_set(base),
         ).returning(Supplier.id, Supplier.tax_id)
-        for row in (await session.execute(stmt)).all():
-            result[str(row.tax_id)] = int(row.id)
+        for tax_row in (await session.execute(stmt_tax)).all():
+            result[str(tax_row.tax_id)] = int(tax_row.id)
 
     if plain:
         stmt_plain = pg_insert(Supplier).values(plain).returning(Supplier.id, Supplier.name)
-        for row in (await session.execute(stmt_plain)).all():
-            result[str(row.name)] = int(row.id)
+        for plain_row in (await session.execute(stmt_plain)).all():
+            result[str(plain_row.name)] = int(plain_row.id)
 
     return result
 
 
 async def get_supplier(session: AsyncSession, supplier_id: int) -> Supplier | None:
-    return await session.get(Supplier, supplier_id)
+    row: Supplier | None = await session.get(Supplier, supplier_id)
+    return row
 
 
 async def find_supplier_by_email(session: AsyncSession, email: str) -> Supplier | None:
-    return await session.scalar(
+    row: Supplier | None = await session.scalar(
         select(Supplier).where(func.lower(Supplier.email) == email.strip().lower()).limit(1)
     )
+    return row
 
 
 # --- Кандидаты -----------------------------------------------------------
@@ -302,18 +309,14 @@ async def upsert_candidates(
     return len(rows)
 
 
-async def list_candidates_for_report(
-    session: AsyncSession, request_id: int
-) -> list[Row[Any]]:
+async def list_candidates_for_report(session: AsyncSession, request_id: int) -> list[Row[Any]]:
     """Кандидаты заявки **без тех, кто в чёрном списке**.
 
     Фильтр стоит здесь, в SQL, до всякого ранжирования: заблокированный
     поставщик не должен попасть в выдачу вообще, даже с лучшей ценой.
     """
     blacklisted = (
-        select(Blacklist.supplier_id)
-        .where(Blacklist.lifted_at.is_(None))
-        .scalar_subquery()
+        select(Blacklist.supplier_id).where(Blacklist.lifted_at.is_(None)).scalar_subquery()
     )
     stmt = (
         select(
@@ -344,9 +347,7 @@ async def list_candidates_for_report(
 async def count_blacklisted_in_request(session: AsyncSession, request_id: int) -> int:
     """Сколько кандидатов этой заявки отсеял чёрный список — для сообщения владельцу."""
     blacklisted = (
-        select(Blacklist.supplier_id)
-        .where(Blacklist.lifted_at.is_(None))
-        .scalar_subquery()
+        select(Blacklist.supplier_id).where(Blacklist.lifted_at.is_(None)).scalar_subquery()
     )
     value = await session.scalar(
         select(func.count())
@@ -358,7 +359,8 @@ async def count_blacklisted_in_request(session: AsyncSession, request_id: int) -
 
 
 async def get_candidate(session: AsyncSession, candidate_id: int) -> Candidate | None:
-    return await session.get(Candidate, candidate_id)
+    row: Candidate | None = await session.get(Candidate, candidate_id)
+    return row
 
 
 # --- Чёрный список -------------------------------------------------------
@@ -384,8 +386,13 @@ async def lift_from_blacklist(session: AsyncSession, supplier_id: int) -> bool:
 
 async def list_blacklist(session: AsyncSession) -> list[Row[Any]]:
     stmt = (
-        select(Blacklist.id, Blacklist.supplier_id, Blacklist.reason, Blacklist.added_at,
-               Supplier.name.label("supplier_name"))
+        select(
+            Blacklist.id,
+            Blacklist.supplier_id,
+            Blacklist.reason,
+            Blacklist.added_at,
+            Supplier.name.label("supplier_name"),
+        )
         .join(Supplier, Supplier.id == Blacklist.supplier_id)
         .where(Blacklist.lifted_at.is_(None))
         .order_by(Blacklist.added_at.desc())
@@ -423,33 +430,36 @@ async def find_quote_by_message_id(
     """Шаг 1 матчинга: In-Reply-To / References → наш Message-ID. Самый надёжный."""
     if not message_ids:
         return None
-    return await session.scalar(
+    row: QuoteRequest | None = await session.scalar(
         select(QuoteRequest).where(QuoteRequest.message_id.in_(message_ids)).limit(1)
     )
+    return row
 
 
 async def find_quote_by_thread(session: AsyncSession, thread_id: str) -> QuoteRequest | None:
     """Шаг 2 матчинга: threadId Gmail."""
-    return await session.scalar(
+    row: QuoteRequest | None = await session.scalar(
         select(QuoteRequest).where(QuoteRequest.gmail_thread == thread_id).limit(1)
     )
+    return row
 
 
 async def find_quote_by_token(session: AsyncSession, token: str) -> QuoteRequest | None:
     """Шаг 3 матчинга: токен в теме письма."""
-    return await session.scalar(
+    row: QuoteRequest | None = await session.scalar(
         select(QuoteRequest)
         .join(Request, Request.id == QuoteRequest.request_id)
         .where(Request.token == token)
         .order_by(QuoteRequest.sent_at.desc())
         .limit(1)
     )
+    return row
 
 
 async def find_quote_by_sender(session: AsyncSession, email: str) -> QuoteRequest | None:
     """Шаг 4 матчинга — последний. Адрес ненадёжен: отвечают из общей почты,
     через секретаря, с личного ящика. Берём только незакрытые запросы."""
-    return await session.scalar(
+    row: QuoteRequest | None = await session.scalar(
         select(QuoteRequest)
         .join(Supplier, Supplier.id == QuoteRequest.supplier_id)
         .where(func.lower(Supplier.email) == email.strip().lower())
@@ -457,6 +467,7 @@ async def find_quote_by_sender(session: AsyncSession, email: str) -> QuoteReques
         .order_by(QuoteRequest.sent_at.desc())
         .limit(1)
     )
+    return row
 
 
 async def mark_quote_replied(
@@ -469,9 +480,7 @@ async def mark_quote_replied(
     }
     if thread_id:
         values["gmail_thread"] = thread_id
-    await session.execute(
-        update(QuoteRequest).where(QuoteRequest.id == quote_id).values(**values)
-    )
+    await session.execute(update(QuoteRequest).where(QuoteRequest.id == quote_id).values(**values))
 
 
 async def set_quote_prices(
@@ -489,7 +498,9 @@ async def set_quote_prices(
     )
 
 
-async def list_silent_quotes(session: AsyncSession, older_than_hours: int = 72) -> list[QuoteRequest]:
+async def list_silent_quotes(
+    session: AsyncSession, older_than_hours: int = 72
+) -> list[QuoteRequest]:
     """Отправленные без ответа. Основа для follow-up."""
     cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(hours=older_than_hours)
     return list(
@@ -505,7 +516,8 @@ async def list_silent_quotes(session: AsyncSession, older_than_hours: int = 72) 
 
 
 async def get_quote(session: AsyncSession, quote_id: int) -> QuoteRequest | None:
-    return await session.get(QuoteRequest, quote_id)
+    row: QuoteRequest | None = await session.get(QuoteRequest, quote_id)
+    return row
 
 
 # --- Критерии ------------------------------------------------------------
@@ -672,12 +684,13 @@ async def get_registry_cache(
     session: AsyncSession, cache_key: str, max_age_days: int
 ) -> RegistryCache | None:
     cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=max_age_days)
-    return await session.scalar(
+    row: RegistryCache | None = await session.scalar(
         select(RegistryCache)
         .where(RegistryCache.cache_key == cache_key)
         .where(RegistryCache.checked_at >= cutoff)
         .limit(1)
     )
+    return row
 
 
 async def put_registry_cache(
@@ -693,17 +706,18 @@ async def put_registry_cache(
     )
     stmt = stmt.on_conflict_do_update(
         index_elements=[RegistryCache.cache_key],
-        set_={"state": stmt.excluded.state, "payload": stmt.excluded.payload,
-              "checked_at": func.now()},
+        set_={
+            "state": stmt.excluded.state,
+            "payload": stmt.excluded.payload,
+            "checked_at": func.now(),
+        },
     )
     await session.execute(stmt)
 
 
 async def purge_registry_cache(session: AsyncSession, older_than_days: int) -> int:
     cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=older_than_days)
-    result = await session.execute(
-        delete(RegistryCache).where(RegistryCache.checked_at < cutoff)
-    )
+    result = await session.execute(delete(RegistryCache).where(RegistryCache.checked_at < cutoff))
     return int(result.rowcount or 0)
 
 
