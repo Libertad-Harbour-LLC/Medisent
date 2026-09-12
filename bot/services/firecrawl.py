@@ -168,7 +168,7 @@ class FirecrawlService:
 
         # Всё, что пришло со страницы, — чужой текст. Проверяем до того, как
         # он попадёт в промпт отчёта.
-        screening = guard.screen_third_party(markdown, source=f"сайт {url}")
+        screening = await guard.screen_third_party_async(markdown, source=f"сайт {url}")
 
         return ScrapeResult(
             url=url,

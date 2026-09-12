@@ -100,7 +100,9 @@ async def run_search(
     tainted_suppliers: set[str] = set()
     supplier_inputs: list[SupplierInput] = []
     for item in search.suppliers:
-        screening = guard.screen_third_party(f"{item.name} {item.note}", source="выдача поиска")
+        screening = await guard.screen_third_party_async(
+            f"{item.name} {item.note}", source="выдача поиска"
+        )
         if screening.suspicious:
             tainted_suppliers.add(item.site or item.name)
             logger.warning(

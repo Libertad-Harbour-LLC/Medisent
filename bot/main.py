@@ -16,6 +16,7 @@ from bot.handlers import admin, errors, intake, selection
 from bot.logging_setup import setup_logging
 from bot.middleware import OwnerOnlyMiddleware, ThrottleMiddleware
 from bot.scheduler import start_background_tasks, stop_background_tasks
+from bot.services import guard
 from bot.services.firecrawl import close_firecrawl_service
 from bot.services.gemini import close_gemini_service
 from bot.services.http import flush_meter
@@ -59,6 +60,8 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dispatcher = build_dispatcher()
+    # Классификатор инъекций грузится здесь, а не посреди первой заявки.
+    await asyncio.to_thread(guard.preload)
     tasks = start_background_tasks(bot)
 
     try:

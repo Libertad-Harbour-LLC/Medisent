@@ -170,6 +170,7 @@ async def persist(
     """
     total = 0
     created = 0
+    events: list[tuple[int, int | None]] = []
     for item in outcome.criteria:
         try:
             criterion_id, is_new = await repo.upsert_criterion(
@@ -181,15 +182,13 @@ async def persist(
             )
         except ValueError:
             continue
-        await repo.record_criterion_event(
-            session,
-            criterion_id=criterion_id,
-            request_id=request_id,
-            supplier_id=item.supplier_id,
-            transcript=outcome.transcript,
-        )
+        events.append((criterion_id, item.supplier_id))
         total += 1
         created += int(is_new)
+    # События — одним пакетом, а не по одному на критерий.
+    repo.record_criterion_events(
+        session, events, request_id=request_id, transcript=outcome.transcript
+    )
 
     logger.info(
         "Критериев записано: %s, из них новых %s", total, created, extra=log_extra(request_id)

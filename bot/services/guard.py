@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -166,22 +167,17 @@ def _model_score(text: str) -> float:
     return max(scores) if scores else 0.0
 
 
-def screen_third_party(text: str, *, source: str) -> ScreenResult:
-    """Проверить чужой текст перед подачей в модель."""
-    if not text or not text.strip():
-        return ScreenResult(suspicious=False, score=0.0, reasons=[])
+def preload() -> None:
+    """Прогреть классификатор при старте, если он включён.
 
-    score, reasons = _heuristic_score(text)
+    Первый вызов ``from_pretrained`` качает и грузит модель на 86M параметров;
+    делать это посреди первой заявки — значит заморозить её на минуту.
+    """
+    if get_settings().prompt_guard_enabled:
+        _load_prompt_guard()
 
-    if get_settings().prompt_guard_enabled and _load_prompt_guard():
-        try:
-            model_score = _model_score(text)
-            if model_score > score:
-                score = model_score
-                reasons = [*reasons, f"классификатор {model_score:.2f}"]
-        except Exception:
-            logger.exception("Prompt-Guard упал на тексте из %s — остаются эвристики", source)
 
+def _combine(text: str, source: str, score: float, reasons: list[str]) -> ScreenResult:
     suspicious = score >= THIRD_PARTY_THRESHOLD
     if suspicious:
         logger.warning(
@@ -193,14 +189,54 @@ def screen_third_party(text: str, *, source: str) -> ScreenResult:
     return ScreenResult(suspicious=suspicious, score=score, reasons=reasons)
 
 
-def sanitise_for_model(text: str, *, source: str, max_chars: int = 20_000) -> str:
+def _with_model(
+    text: str, source: str, score: float, reasons: list[str]
+) -> tuple[float, list[str]]:
+    try:
+        model_score = _model_score(text)
+    except Exception:
+        logger.exception("Prompt-Guard упал на тексте из %s — остаются эвристики", source)
+        return score, reasons
+    if model_score > score:
+        return model_score, [*reasons, f"классификатор {model_score:.2f}"]
+    return score, reasons
+
+
+def screen_third_party(text: str, *, source: str) -> ScreenResult:
+    """Проверить чужой текст перед подачей в модель (синхронно).
+
+    Из async-кода вызывать ``screen_third_party_async``: классификатор —
+    CPU-проход torch по каждому окну в 1800 символов, и на странице в 60 КБ
+    это секунды, в течение которых event loop стоит.
+    """
+    if not text or not text.strip():
+        return ScreenResult(suspicious=False, score=0.0, reasons=[])
+
+    score, reasons = _heuristic_score(text)
+    if get_settings().prompt_guard_enabled and _load_prompt_guard():
+        score, reasons = _with_model(text, source, score, reasons)
+    return _combine(text, source, score, reasons)
+
+
+async def screen_third_party_async(text: str, *, source: str) -> ScreenResult:
+    """То же, но классификатор считается в отдельном потоке."""
+    if not text or not text.strip():
+        return ScreenResult(suspicious=False, score=0.0, reasons=[])
+
+    score, reasons = _heuristic_score(text)
+    if get_settings().prompt_guard_enabled and await asyncio.to_thread(_load_prompt_guard):
+        score, reasons = await asyncio.to_thread(_with_model, text, source, score, reasons)
+    return _combine(text, source, score, reasons)
+
+
+async def sanitise_for_model(text: str, *, source: str, max_chars: int = 20_000) -> str:
     """Полный цикл: проверить, при необходимости пометить, обернуть.
 
     Подозрительный текст не выбрасывается: в письме поставщика может быть и
     попытка перехвата, и настоящая цена. Он помечается, обрезается и
     отправляется в модель в обёртке — а владелец видит пометку в отчёте.
     """
-    result = screen_third_party(text, source=source)
+    result = await screen_third_party_async(text, source=source)
     body = text[:max_chars]
     if len(text) > max_chars:
         body += f"\n[обрезано, всего {len(text)} символов]"

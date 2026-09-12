@@ -180,7 +180,7 @@ async def extract_from_letter(
     if attachments_text:
         combined += f"\n\n--- из вложений ---\n{attachments_text}"
 
-    safe = guard.sanitise_for_model(combined, source="письмо поставщика")
+    safe = await guard.sanitise_for_model(combined, source="письмо поставщика")
 
     try:
         parsed = await get_gemini_service().generate_json(

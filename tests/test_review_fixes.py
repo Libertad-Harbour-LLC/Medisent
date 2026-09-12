@@ -1037,3 +1037,69 @@ async def test_upsert_survives_duplicate_domains_in_one_batch(
         assert supplier is not None
         assert supplier.name == "ООО Медтех", "первое имя остаётся"
         assert supplier.email == "s@medtech.ru", "пустое поле дополняется вторым входом"
+
+
+# --- №19, №22: классификатор вне event loop, pg_trgm один раз ---------------
+
+
+async def test_async_screening_runs_the_classifier_in_another_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    from bot.config import get_settings
+    from bot.services import guard
+
+    main_thread = threading.get_ident()
+    seen: list[int] = []
+
+    def fake_score(text: str) -> float:
+        seen.append(threading.get_ident())
+        return 0.95
+
+    monkeypatch.setattr(get_settings(), "prompt_guard_enabled", True)
+    monkeypatch.setattr(guard, "_load_prompt_guard", lambda: True)
+    monkeypatch.setattr(guard, "_model_score", fake_score)
+
+    result = await guard.screen_third_party_async("обычный текст страницы", source="сайт")
+    assert result.suspicious is True
+    assert seen and seen[0] != main_thread, "torch считает не в потоке event loop"
+
+
+@needs_db
+async def test_trigram_check_is_cached_and_events_are_batched(
+    db: async_sessionmaker[AsyncSession],
+) -> None:
+    from sqlalchemy import func, select
+
+    from bot.db.models import CriterionEvent
+    from bot.services.criteria import ExtractedCriterion, SelectionOutcome, persist
+
+    repo.reset_trigram_cache()
+    async with db() as session:
+        assert await repo._trigram_available(session) is True
+        assert repo._trigram_cache is True
+
+        # Дальше запрос к pg_extension не нужен: подменяем scalar и убеждаемся,
+        # что кэш отвечает сам.
+        async def boom(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("pg_extension спросили второй раз")
+
+        original = session.scalar
+        session.scalar = boom  # type: ignore[method-assign]
+        assert await repo._trigram_available(session) is True
+        session.scalar = original  # type: ignore[method-assign]
+
+        request = await repo.create_request(session, product="Т", raw_input="", input_kind="text")
+        outcome = SelectionOutcome(
+            criteria=[
+                ExtractedCriterion(text="срок важнее цены", direction="plus", weight=1.0),
+                ExtractedCriterion(text="без РУ не берём", direction="minus", weight=2.0),
+            ],
+            transcript="беру второго",
+        )
+        total, created = await persist(session, outcome, request_id=int(request.id))
+        await session.commit()
+        assert (total, created) == (2, 2)
+        count = await session.scalar(select(func.count()).select_from(CriterionEvent))
+        assert count == 2

@@ -676,11 +676,27 @@ async def get_quote(session: AsyncSession, quote_id: int) -> QuoteRequest | None
 # --- Критерии ------------------------------------------------------------
 
 
+# Есть ли pg_trgm — свойство базы, а не заявки; спрашивать на каждом
+# критерии (пять-шесть round-trip на голосовое) незачем.
+_trigram_cache: bool | None = None
+
+
 async def _trigram_available(session: AsyncSession) -> bool:
-    value = await session.scalar(
-        select(func.count()).select_from(text("pg_extension")).where(text("extname = 'pg_trgm'"))
-    )
-    return bool(value)
+    global _trigram_cache
+    if _trigram_cache is None:
+        value = await session.scalar(
+            select(func.count())
+            .select_from(text("pg_extension"))
+            .where(text("extname = 'pg_trgm'"))
+        )
+        _trigram_cache = bool(value)
+    return _trigram_cache
+
+
+def reset_trigram_cache() -> None:
+    """Только для тестов, где схема пересоздаётся между прогонами."""
+    global _trigram_cache
+    _trigram_cache = None
 
 
 async def upsert_criterion(
@@ -745,23 +761,26 @@ async def upsert_criterion(
     return int(row.id), True
 
 
-async def record_criterion_event(
+def record_criterion_events(
     session: AsyncSession,
+    events: list[tuple[int, int | None]],
     *,
-    criterion_id: int,
     request_id: int | None,
-    supplier_id: int | None,
     transcript: str | None,
 ) -> None:
-    """Сырое голосовое сохраняется обязательно — иначе странный критерий
-    через полгода нечем будет объяснить."""
-    session.add(
+    """События ``(criterion_id, supplier_id)`` одним пакетом.
+
+    Сырое голосовое сохраняется с каждым — иначе странный критерий через
+    полгода нечем будет объяснить.
+    """
+    session.add_all(
         CriterionEvent(
             criterion_id=criterion_id,
             request_id=request_id,
             supplier_id=supplier_id,
             transcript=transcript,
         )
+        for criterion_id, supplier_id in events
     )
 
 
