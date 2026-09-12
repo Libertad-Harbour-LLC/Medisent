@@ -24,6 +24,7 @@ import httpx
 
 from bot.config import get_settings
 from bot.logging_setup import log_extra
+from bot.services import budget
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class CallResult:
     duration_ms: int = 0
     attempts: int = 1
     headers: dict[str, str] = field(default_factory=dict)
+    budget_exceeded: bool = False
 
     @property
     def timed_out(self) -> bool:
@@ -76,6 +78,7 @@ async def _record(
     cost_usd: Decimal | None,
     status: str,
     duration_ms: int,
+    cached_tokens: int | None = None,
 ) -> None:
     """Пишет строку в api_calls. Сбой учёта не должен ронять основную работу."""
     if _meter is not None:
@@ -88,6 +91,7 @@ async def _record(
             cost_usd=cost_usd,
             status=status,
             duration_ms=duration_ms,
+            cached_tokens=cached_tokens,
         )
         return
 
@@ -170,21 +174,48 @@ class ApiClient:
         tokens_in: int | None = None,
         tokens_out: int | None = None,
         expect_json: bool = True,
+        retries: int | None = None,
+        redact_body: bool = False,
         **kwargs: Any,
     ) -> CallResult:
+        """Один вызов внешнего сервиса.
+
+        ``retries=0`` — для неидемпотентных операций: повторить отправку
+        письма после таймаута значит отправить его дважды.
+
+        ``redact_body=True`` — не класть тело ответа в ``CallResult`` и не
+        писать его в лог. Нужно там, где в ответе приходит секрет: обновление
+        OAuth-токена возвращает access_token и refresh_token.
+        """
         started = time.monotonic()
+        max_retries = self.max_retries if retries is None else retries
+
+        # Потолок на заявку проверяется до вызова, а не после: смысл в том,
+        # чтобы деньги не ушли, а не в том, чтобы узнать об этом первым.
+        if cost_usd and not await budget.allow(request_id, cost_usd):
+            logger.warning(
+                "%s %s не отправлен: исчерпан потолок на заявку",
+                self.service,
+                operation or url,
+                extra=log_extra(request_id),
+            )
+            return CallResult(
+                ok=False,
+                error="исчерпан потолок расходов на заявку",
+                budget_exceeded=True,
+            )
         extra = log_extra(request_id)
         last_error: str | None = None
         status_code: int | None = None
         attempt = 0
 
-        while attempt <= self.max_retries:
+        while attempt <= max_retries:
             attempt += 1
             try:
                 response = await self._client.request(method, url, **kwargs)
                 status_code = response.status_code
 
-                if status_code in RETRY_STATUSES and attempt <= self.max_retries:
+                if status_code in RETRY_STATUSES and attempt <= max_retries:
                     delay = _backoff_seconds(attempt, response.headers.get("Retry-After"))
                     logger.warning(
                         "%s %s вернул %s, повтор через %.1f с (попытка %s из %s)",
@@ -193,7 +224,7 @@ class ApiClient:
                         status_code,
                         delay,
                         attempt,
-                        self.max_retries + 1,
+                        max_retries + 1,
                         extra=extra,
                     )
                     await asyncio.sleep(delay)
@@ -249,14 +280,15 @@ class ApiClient:
             except httpx.HTTPStatusError as exc:
                 # 4xx кроме 429: наша ошибка, повторять бессмысленно.
                 status_code = exc.response.status_code
-                last_error = f"HTTP {status_code}: {exc.response.text[:200]}"
+                body = "[тело скрыто]" if redact_body else exc.response.text[:200]
+                last_error = f"HTTP {status_code}: {body}"
                 logger.error("%s %s: %s", self.service, operation or url, last_error, extra=extra)
                 break
 
             except RETRY_EXCEPTIONS as exc:
                 kind = "таймаут" if isinstance(exc, httpx.TimeoutException) else "обрыв соединения"
                 last_error = f"{kind}: {exc}"
-                if attempt > self.max_retries:
+                if attempt > max_retries:
                     logger.error(
                         "%s %s: %s, попытки исчерпаны",
                         self.service,
@@ -273,7 +305,7 @@ class ApiClient:
                     last_error,
                     delay,
                     attempt,
-                    self.max_retries + 1,
+                    max_retries + 1,
                     extra=extra,
                 )
                 await asyncio.sleep(delay)

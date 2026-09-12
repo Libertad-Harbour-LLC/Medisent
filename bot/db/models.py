@@ -194,7 +194,12 @@ class QuoteRequest(Base):
     status: Mapped[str | None] = mapped_column(Text)
 
     # Матчинг ответов ищет по этим трём полям, каждый поиск — точечный.
+    #
+    # Уникальность пары «заявка + поставщик» держит база, а не проверка в коде:
+    # повторный выбор того же поставщика голосовым не должен отправить второе
+    # письмо, а ловить это условием в хендлере — значит проиграть гонку.
     __table_args__ = (
+        UniqueConstraint("request_id", "supplier_id", name="quote_requests_request_supplier_uq"),
         Index("ix_quote_requests_message_id", "message_id"),
         Index("ix_quote_requests_gmail_thread", "gmail_thread"),
         Index("ix_quote_requests_request_id", "request_id"),
@@ -282,6 +287,9 @@ class ApiCall(Base):
     request_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("requests.id"))
     tokens_in: Mapped[int | None] = mapped_column(Integer)
     tokens_out: Mapped[int | None] = mapped_column(Integer)
+    # Сколько токенов промпта модель взяла из своего кэша. Без этой цифры не
+    # видно, работает ли стабильный префикс промпта.
+    cached_tokens: Mapped[int | None] = mapped_column(Integer)
     cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
     status: Mapped[str | None] = mapped_column(Text)  # ok | error | timeout
     duration_ms: Mapped[int | None] = mapped_column(Integer)
@@ -318,3 +326,53 @@ class GmailState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     history_id: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[dt.datetime] = mapped_column(TZDateTime, server_default=func.now())
+
+
+class ApprovalKind:
+    EMAIL = "email"
+    KP = "kp"
+
+
+class ApprovalDecision:
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+class Approval(Base):
+    """Что именно владелец одобрил, дословно.
+
+    Раньше черновик письма и разобранные цены жили в словаре модуля: перезапуск
+    контейнера — и нажатие «Да» упиралось в пустоту. Теперь одобряемое лежит
+    в базе, и отправка берёт адресата и текст **отсюда**, а не перечитывает
+    поставщика заново. Иначе правка записи между показом и подтверждением
+    отправила бы письмо по адресу, которого владелец не видел.
+
+    ``payload_hash`` — отпечаток показанного. По нему видно в логах, что ушло
+    ровно то, что показывали.
+    """
+
+    __tablename__ = "approvals"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # email | kp
+    request_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("requests.id"))
+    supplier_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("suppliers.id"))
+    quote_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("quote_requests.id"))
+
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[dt.datetime] = mapped_column(TZDateTime, nullable=False)
+    decided_at: Mapped[dt.datetime | None] = mapped_column(TZDateTime)
+    decision: Mapped[str | None] = mapped_column(Text)
+    applied_at: Mapped[dt.datetime | None] = mapped_column(TZDateTime)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+    __table_args__ = (
+        Index("ix_approvals_request_id", "request_id"),
+        Index("ix_approvals_pending", "kind", "decision"),
+    )

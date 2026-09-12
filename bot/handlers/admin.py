@@ -12,6 +12,7 @@ from bot import texts
 from bot.db import repo
 from bot.db.models import RequestStatus
 from bot.db.session import session_scope
+from bot.services import budget
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
@@ -71,7 +72,9 @@ async def cmd_cancel(message: Message) -> None:
         if request is None:
             await message.answer(texts.SESSION_NONE)
             return
-        await repo.set_request_status(session, int(request.id), RequestStatus.CLOSED)
+        request_id = int(request.id)
+        await repo.set_request_status(session, request_id, RequestStatus.CLOSED)
+    budget.forget(request_id)
     await message.answer(texts.CANCELLED)
 
 

@@ -379,3 +379,66 @@ async def build_pdf(
         return False, "сборка КП не уложилась в 180 секунд"
     finally:
         await asyncio.to_thread(data_path.unlink, True)
+
+
+# --- Сериализация для таблицы одобрений ----------------------------------
+#
+# В одобрении хранится ровно то, что показали владельцу. Собирается КП потом
+# из этой записи, а не из свежего разбора письма: между показом и нажатием
+# «Да» модель могла бы разобрать письмо иначе.
+
+
+def extraction_to_payload(extraction: Extraction) -> dict[str, Any]:
+    """Разбор цен → JSON для колонки ``approvals.payload``."""
+    return {
+        "currency": extraction.currency,
+        "lead_time": extraction.lead_time,
+        "payment_terms": extraction.payment_terms,
+        "valid_until": extraction.valid_until,
+        "notes": list(extraction.notes),
+        "items": [
+            {
+                "name": item.name,
+                "qty": str(item.qty),
+                "price": str(item.price),
+                "unit": item.unit,
+                "note": item.note,
+                "vat_included": item.vat_included,
+                "min_qty": str(item.min_qty) if item.min_qty is not None else None,
+                "prepayment_pct": (
+                    str(item.prepayment_pct) if item.prepayment_pct is not None else None
+                ),
+                "caveat": item.caveat,
+            }
+            for item in extraction.items
+        ],
+    }
+
+
+def extraction_from_payload(payload: dict[str, Any]) -> Extraction:
+    """Обратно из одобрения. Decimal восстанавливается из строк, а не из float:
+    цена в документе с подписью не должна поехать на копейку."""
+    items = [
+        ExtractedItem(
+            name=str(row.get("name", "")),
+            qty=Decimal(str(row.get("qty", "1"))),
+            price=Decimal(str(row.get("price", "0"))),
+            unit=str(row.get("unit", "шт.")),
+            note=str(row.get("note", "")),
+            vat_included=row.get("vat_included"),
+            min_qty=Decimal(str(row["min_qty"])) if row.get("min_qty") else None,
+            prepayment_pct=(
+                Decimal(str(row["prepayment_pct"])) if row.get("prepayment_pct") else None
+            ),
+            caveat=str(row.get("caveat", "")),
+        )
+        for row in payload.get("items", [])
+    ]
+    return Extraction(
+        items=items,
+        currency=str(payload.get("currency", "RUB")),
+        lead_time=str(payload.get("lead_time", "")),
+        payment_terms=str(payload.get("payment_terms", "")),
+        valid_until=str(payload.get("valid_until", "")),
+        notes=[str(n) for n in payload.get("notes", [])],
+    )

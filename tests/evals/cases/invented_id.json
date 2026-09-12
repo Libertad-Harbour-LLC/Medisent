@@ -1,0 +1,11 @@
+{
+  "note": "Модель назвала кандидата, которого ей не давали",
+  "model_output": {
+    "ranked": [
+      {"id": 1, "rank": 1, "reason": "Первый", "concerns": []},
+      {"id": 999, "rank": 2, "reason": "Выдуманный поставщик", "concerns": []}
+    ],
+    "summary": "Вывод.",
+    "missing_data": []
+  }
+}

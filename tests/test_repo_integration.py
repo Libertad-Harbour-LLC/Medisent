@@ -54,7 +54,9 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 async def test_token_is_sequential_within_year(session: AsyncSession) -> None:
     first = await repo.create_request(session, product="Тонометр", raw_input="", input_kind="text")
-    second = await repo.create_request(session, product="Термометр", raw_input="", input_kind="text")
+    second = await repo.create_request(
+        session, product="Термометр", raw_input="", input_kind="text"
+    )
     await session.commit()
 
     assert first.token.endswith("-001")
@@ -110,7 +112,7 @@ async def test_same_domain_different_case_is_one_supplier(session: AsyncSession)
     assert first["example.ru"] == second["example.ru"]
     supplier = await repo.get_supplier(session, first["example.ru"])
     assert supplier is not None
-    assert supplier.email == "sales@example.ru"   # контакт дописался
+    assert supplier.email == "sales@example.ru"  # контакт дописался
 
 
 async def test_upsert_does_not_erase_known_contact_with_empty(session: AsyncSession) -> None:

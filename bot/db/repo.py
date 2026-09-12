@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
@@ -22,6 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import (
     ApiCall,
+    Approval,
+    ApprovalDecision,
     Blacklist,
     Candidate,
     Criterion,
@@ -65,10 +69,7 @@ async def create_request(
 
     next_number: int | None = await session.scalar(
         select(
-            func.coalesce(
-                func.max(cast(func.split_part(Request.token, "-", 3), Integer)), 0
-            )
-            + 1
+            func.coalesce(func.max(cast(func.split_part(Request.token, "-", 3), Integer)), 0) + 1
         ).where(Request.token.like(f"RFQ-{year}-%"))
     )
     token = f"RFQ-{year}-{int(next_number or 1):03d}"
@@ -91,14 +92,18 @@ async def get_request(session: AsyncSession, request_id: int) -> Request | None:
 
 
 async def get_request_by_token(session: AsyncSession, token: str) -> Request | None:
-    row: Request | None = await session.scalar(
-        select(Request).where(Request.token == token)
-    )
+    row: Request | None = await session.scalar(select(Request).where(Request.token == token))
     return row
 
 
 async def get_active_request(session: AsyncSession) -> Request | None:
-    """Последняя незакрытая заявка. Владелец один, параллельных сессий нет."""
+    """Последняя незакрытая заявка — для ``/session`` и справочных ответов.
+
+    Для привязки голосового выбора этого мало: см.
+    ``list_requests_awaiting_choice``. «Последняя незакрытая» и «та, по которой
+    показан отчёт» — разные вещи, если владелец завёл вторую заявку, не
+    закрыв первую.
+    """
     row: Request | None = await session.scalar(
         select(Request)
         .where(Request.status != RequestStatus.CLOSED)
@@ -106,6 +111,24 @@ async def get_active_request(session: AsyncSession) -> Request | None:
         .limit(1)
     )
     return row
+
+
+async def list_requests_awaiting_choice(session: AsyncSession) -> list[Request]:
+    """Все заявки, по которым показан отчёт и ждут выбора.
+
+    Голосовое привязывается к заявке отсюда. Если таких заявок больше одной,
+    угадывать нельзя: критерии уедут к чужим поставщикам, а исправить это
+    потом будет нечем. Вызывающий код в этом случае спрашивает владельца.
+    """
+    return list(
+        (
+            await session.scalars(
+                select(Request)
+                .where(Request.status == RequestStatus.AWAITING_CHOICE)
+                .order_by(Request.created_at)
+            )
+        ).all()
+    )
 
 
 async def set_request_status(session: AsyncSession, request_id: int, status: str) -> None:
@@ -331,6 +354,12 @@ async def list_candidates_for_report(session: AsyncSession, request_id: int) -> 
             Candidate.ru_registry,
             Candidate.ru_checked_at,
             Candidate.unrega_flags,
+            # Флаг из guard: на странице поставщика нашёлся текст, похожий на
+            # попытку повлиять на отбор. Достаём его здесь, чтобы он дошёл до
+            # отчёта: детектор без последствий бесполезен.
+            Candidate.raw["scrape"]["injection_suspected"]
+            .as_boolean()
+            .label("injection_suspected"),
             Supplier.name.label("supplier_name"),
             Supplier.domain,
             Supplier.email,
@@ -403,6 +432,19 @@ async def list_blacklist(session: AsyncSession) -> list[Row[Any]]:
 # --- Запросы цены и ответы ----------------------------------------------
 
 
+async def find_quote(
+    session: AsyncSession, request_id: int, supplier_id: int
+) -> QuoteRequest | None:
+    """Уже отправляли этому поставщику по этой заявке?"""
+    row: QuoteRequest | None = await session.scalar(
+        select(QuoteRequest)
+        .where(QuoteRequest.request_id == request_id)
+        .where(QuoteRequest.supplier_id == supplier_id)
+        .limit(1)
+    )
+    return row
+
+
 async def create_quote_request(
     session: AsyncSession,
     *,
@@ -410,18 +452,27 @@ async def create_quote_request(
     supplier_id: int,
     gmail_thread: str | None,
     message_id: str | None,
-) -> QuoteRequest:
-    row = QuoteRequest(
-        request_id=request_id,
-        supplier_id=supplier_id,
-        gmail_thread=gmail_thread,
-        message_id=message_id,
-        sent_at=dt.datetime.now(dt.UTC),
-        status="sent",
+) -> QuoteRequest | None:
+    stmt = (
+        pg_insert(QuoteRequest)
+        .values(
+            request_id=request_id,
+            supplier_id=supplier_id,
+            gmail_thread=gmail_thread,
+            message_id=message_id,
+            sent_at=dt.datetime.now(dt.UTC),
+            status="sent",
+        )
+        # Пара «заявка + поставщик» уникальна. Конфликт означает, что письмо
+        # этому поставщику по этой заявке уже уходило: ничего не пишем и
+        # возвращаем None, чтобы вызывающий сказал об этом владельцу.
+        .on_conflict_do_nothing(constraint="quote_requests_request_supplier_uq")
+        .returning(QuoteRequest.id)
     )
-    session.add(row)
-    await session.flush()
-    return row
+    new_id = await session.scalar(stmt)
+    if new_id is None:
+        return None
+    return await session.get(QuoteRequest, new_id)
 
 
 async def find_quote_by_message_id(
@@ -639,6 +690,7 @@ async def record_api_call(
     cost_usd: Decimal | None,
     status: str,
     duration_ms: int | None,
+    cached_tokens: int | None = None,
 ) -> None:
     session.add(
         ApiCall(
@@ -647,6 +699,7 @@ async def record_api_call(
             request_id=request_id,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            cached_tokens=cached_tokens,
             cost_usd=cost_usd,
             status=status,
             duration_ms=duration_ms,
@@ -751,3 +804,122 @@ async def list_orders_for_supplier(session: AsyncSession, supplier_id: int) -> l
             )
         ).all()
     )
+
+
+# --- Одобрения -----------------------------------------------------------
+
+
+APPROVAL_TTL_HOURS = 24
+
+
+def payload_hash(payload: dict[str, Any]) -> str:
+    """Отпечаток показанного владельцу. Ключи сортируются, чтобы порядок полей
+    не менял хеш."""
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+async def create_approval(
+    session: AsyncSession,
+    *,
+    kind: str,
+    payload: dict[str, Any],
+    request_id: int | None = None,
+    supplier_id: int | None = None,
+    quote_id: int | None = None,
+    ttl_hours: int = APPROVAL_TTL_HOURS,
+) -> Approval:
+    """Записать то, что показываем владельцу на подтверждение.
+
+    Срок жизни нужен, потому что кнопки в Telegram не протухают: нажатие на
+    кнопку недельной давности не должно ничего отправлять.
+    """
+    row = Approval(
+        kind=kind,
+        request_id=request_id,
+        supplier_id=supplier_id,
+        quote_id=quote_id,
+        payload=payload,
+        payload_hash=payload_hash(payload),
+        expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(hours=ttl_hours),
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def claim_approval(
+    session: AsyncSession, approval_id: int, *, decision: str
+) -> Approval | None:
+    """Атомарно занять одобрение под решение владельца.
+
+    Возвращает строку, только если решение принимается впервые и срок не
+    истёк. Повторная доставка callback, второе нажатие и просроченная кнопка
+    получают ``None`` — и не приводят ко второй отправке.
+
+    Проверка и запись сделаны одним UPDATE намеренно: между SELECT и UPDATE
+    помещается второй callback.
+    """
+    stmt = (
+        update(Approval)
+        .where(Approval.id == approval_id)
+        .where(Approval.decision.is_(None))
+        .where(Approval.expires_at > func.now())
+        .values(decision=decision, decided_at=func.now())
+        .returning(Approval.id)
+    )
+    claimed = await session.scalar(stmt)
+    if claimed is None:
+        return None
+    return await session.get(Approval, claimed)
+
+
+async def get_approval(session: AsyncSession, approval_id: int) -> Approval | None:
+    row: Approval | None = await session.get(Approval, approval_id)
+    return row
+
+
+async def mark_approval_applied(
+    session: AsyncSession, approval_id: int, result: dict[str, Any]
+) -> None:
+    """Отметить, что одобренное действие выполнено, и чем оно закончилось."""
+    await session.execute(
+        update(Approval)
+        .where(Approval.id == approval_id)
+        .values(applied_at=func.now(), result=result)
+    )
+
+
+async def expire_stale_approvals(session: AsyncSession) -> int:
+    """Пометить просроченные нерешённые одобрения. Чисто гигиена журнала."""
+    result = await session.execute(
+        update(Approval)
+        .where(Approval.decision.is_(None))
+        .where(Approval.expires_at <= func.now())
+        .values(decision=ApprovalDecision.EXPIRED, decided_at=func.now())
+    )
+    return int(result.rowcount or 0)
+
+
+async def spent_on_request(session: AsyncSession, request_id: int) -> Decimal:
+    """Сколько уже потрачено по одной заявке. Основа потолка на заявку."""
+    value = await session.scalar(
+        select(func.coalesce(func.sum(ApiCall.cost_usd), 0)).where(ApiCall.request_id == request_id)
+    )
+    return Decimal(str(value or 0))
+
+
+async def find_kp_approval(session: AsyncSession, quote_id: int) -> Approval | None:
+    """Разбирали ли уже цены по этому запросу.
+
+    Повторное письмо от того же поставщика не должно снова гонять модель:
+    разговорчивый поставщик оплачивался бы столько раз, сколько раз ответил.
+    """
+    row: Approval | None = await session.scalar(
+        select(Approval)
+        .where(Approval.kind == "kp")
+        .where(Approval.quote_id == quote_id)
+        .order_by(Approval.created_at.desc())
+        .limit(1)
+    )
+    return row

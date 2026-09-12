@@ -43,9 +43,10 @@ def test_prepayment_shows_up_in_caveats() -> None:
 
 
 def test_free_form_caveat_is_kept() -> None:
-    assert "цена действует до конца квартала" in item(
-        caveat="цена действует до конца квартала"
-    ).caveats
+    assert (
+        "цена действует до конца квартала"
+        in item(caveat="цена действует до конца квартала").caveats
+    )
 
 
 def test_all_caveats_combine() -> None:
@@ -115,7 +116,7 @@ def test_missing_valid_until_gets_default_and_reports_it() -> None:
     expected = (dt.date.today() + dt.timedelta(days=14)).strftime("%d.%m.%Y")
 
     assert data["valid_until"] == expected
-    assert warning == expected     # непустое предупреждение = владельцу скажут
+    assert warning == expected  # непустое предупреждение = владельцу скажут
 
 
 def test_explicit_valid_until_is_kept_without_warning() -> None:

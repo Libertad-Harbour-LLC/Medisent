@@ -44,7 +44,9 @@ def make_view(**kwargs: object) -> CandidateView:
 
 
 def render_one(view: CandidateView) -> str:
-    return "\n".join(render(Report(request_token="RFQ-2026-041", product="Тонометр", candidates=[view])))
+    return "\n".join(
+        render(Report(request_token="RFQ-2026-041", product="Тонометр", candidates=[view]))
+    )
 
 
 # --- Критерий приёмки этапа 5 -------------------------------------------

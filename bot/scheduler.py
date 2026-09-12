@@ -70,6 +70,10 @@ async def cache_purge_loop() -> None:
                 removed = await repo.purge_registry_cache(session, settings.registry_cache_days * 2)
             if removed:
                 logger.info("Из кэша реестра удалено записей: %s", removed)
+            async with session_scope() as session:
+                expired = await repo.expire_stale_approvals(session)
+            if expired:
+                logger.info("Просроченных одобрений помечено: %s", expired)
         except Exception:
             logger.exception("Чистка кэша упала")
 
@@ -194,16 +198,11 @@ async def _handle_incoming(bot: Bot, gmail_message_id: str) -> None:
     # Дальше — этап 8: разбор цен и подтверждение чисел владельцем.
     from bot.handlers.selection import offer_kp
 
-    class _Shim:
-        """Минимальный интерфейс Message, который нужен offer_kp."""
-
-        @staticmethod
-        async def answer(text: str, **kwargs: object) -> None:
-            await bot.send_message(settings.telegram_owner_id, text, **kwargs)  # type: ignore[arg-type]
-
     await offer_kp(
-        _Shim(),  # type: ignore[arg-type]
+        bot,
+        settings.telegram_owner_id,
         quote_id=quote_id,
+        request_id=request_id,
         letter_text=headers.body,
         attachments_text=attachments_text,
     )

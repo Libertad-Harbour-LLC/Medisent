@@ -235,6 +235,9 @@ class MailService:
             TOKEN_URL,
             operation="oauth.refresh",
             request_id=request_id,
+            # В ответе приходят access_token и refresh_token. Одна отладочная
+            # строка с CallResult — и токен в файле лога.
+            redact_body=True,
             data={
                 "client_id": settings.google_client_id,
                 "client_secret": settings.google_client_secret,
@@ -256,6 +259,41 @@ class MailService:
     async def _auth_headers(self, request_id: int | None = None) -> dict[str, str]:
         return {"Authorization": f"Bearer {await self._token(request_id)}"}
 
+    async def find_sent_by_message_id(
+        self, message_id: str, *, request_id: int | None = None
+    ) -> str | None:
+        """Есть ли в ящике уже отправленное письмо с таким ``Message-ID``.
+
+        Возвращает ``threadId`` найденного письма, иначе ``None``. Нужно после
+        неясного сбоя отправки: Gmail мог принять письмо и не успеть ответить.
+        """
+        result = await self._client.get(
+            f"{GMAIL_BASE}/messages",
+            operation="messages.list.byMsgId",
+            request_id=request_id,
+            headers=await self._auth_headers(request_id),
+            params={"q": f"rfc822msgid:{message_id.strip('<>')}", "maxResults": 1},
+        )
+        if not result.ok:
+            return None
+        messages = (result.json or {}).get("messages") or []
+        if not messages:
+            return None
+        found_id = str(messages[0].get("id") or "")
+        if not found_id:
+            return None
+
+        details = await self._client.get(
+            f"{GMAIL_BASE}/messages/{found_id}",
+            operation="messages.get.byMsgId",
+            request_id=request_id,
+            headers=await self._auth_headers(request_id),
+            params={"format": "minimal"},
+        )
+        if not details.ok:
+            return None
+        return str((details.json or {}).get("threadId") or "")
+
     async def send(
         self,
         *,
@@ -265,7 +303,14 @@ class MailService:
         body: str,
         request_id: int | None = None,
     ) -> tuple[str, str]:
-        """Отправить письмо. Возвращает ``(threadId, Message-ID)``."""
+        """Отправить письмо. Возвращает ``(threadId, Message-ID)``.
+
+        Ретраев здесь нет намеренно. Отправка не идемпотентна: Gmail мог
+        принять письмо и не успеть ответить, и слепой повтор отправил бы
+        поставщику второй такой же запрос. Вместо повтора — проверка по
+        собственному ``Message-ID``, который ставится до отправки: если письмо
+        в ящике уже есть, значит оно ушло, и повторять нечего.
+        """
         settings = self._settings
         raw, message_id = build_message(
             sender=settings.gmail_sender,
@@ -281,8 +326,21 @@ class MailService:
             request_id=request_id,
             headers=await self._auth_headers(request_id),
             json={"raw": raw},
+            retries=0,
         )
+
         if not result.ok:
+            # Сбой мог случиться и после того, как Gmail принял письмо.
+            # Прежде чем сказать «не отправлено», смотрим, нет ли его в ящике.
+            existing_thread = await self.find_sent_by_message_id(message_id, request_id=request_id)
+            if existing_thread is not None:
+                logger.warning(
+                    "Отправка вернула ошибку (%s), но письмо в ящике есть — "
+                    "считаем отправленным",
+                    result.error,
+                    extra=log_extra(request_id),
+                )
+                return existing_thread, message_id
             raise MailError(f"письмо не отправлено: {result.error}")
 
         payload = result.json or {}
@@ -325,6 +383,7 @@ class MailService:
             request_id=request_id,
             headers=await self._auth_headers(request_id),
             json={"raw": raw},
+            retries=0,  # отправка не идемпотентна
         )
         if not result.ok:
             raise MailError(f"файл не переслан: {result.error}")

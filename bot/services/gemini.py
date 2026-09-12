@@ -304,11 +304,16 @@ class GeminiService:
         model: str | None = None,
         request_id: int | None = None,
         operation: str | None = None,
+        untrusted: bool = False,
     ) -> dict[str, Any]:
         """Прогнать промпт из ``prompts/<name>.md`` над готовым JSON.
 
         Файл читается с диска при каждом вызове: владелец правит инструкцию и
         видит результат без перезапуска бота.
+
+        ``untrusted=True`` — данные содержат текст из чужих рук (названия
+        компаний, придуманные моделью поиска по чужим страницам). Тогда JSON
+        уходит в модель в явной рамке с указанием не исполнять то, что внутри.
         """
         path = Path(self._settings.prompts_dir) / f"{prompt_name}.md"
         try:
@@ -316,8 +321,14 @@ class GeminiService:
         except FileNotFoundError as exc:
             raise GeminiError(f"нет файла инструкции {path}") from exc
 
+        body = json.dumps(payload, ensure_ascii=False, indent=2)
+        if untrusted:
+            from bot.services import guard
+
+            body = guard.wrap_untrusted(body, source="поиск и сайты поставщиков")
+
         return await self.generate_json(
-            parts=[Part(text=json.dumps(payload, ensure_ascii=False, indent=2))],
+            parts=[Part(text=body)],
             system_instruction=instruction,
             schema=schema,
             model=model,

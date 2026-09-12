@@ -14,6 +14,7 @@ from bot.db import repo
 from bot.db.models import RequestStatus
 from bot.db.session import session_scope
 from bot.pipeline import build_report, run_search
+from bot.services import budget
 from bot.services.gemini import GeminiError, ProductRequest, get_gemini_service
 from bot.services.mail import MailError, get_mail_service
 from bot.services.report import render
@@ -70,9 +71,16 @@ async def _start_pipeline(message: Message, parsed: ProductRequest, input_kind: 
         await message.answer(texts.SEARCH_NOTHING)
         async with session_scope() as session:
             await repo.set_request_status(session, request_id, RequestStatus.CLOSED)
+        budget.forget(request_id)
         return
 
     await message.answer(texts.search_found(summary.total_found, summary.blacklisted))
+    if summary.budget_exceeded:
+        await message.answer(
+            texts.BUDGET_PER_REQUEST_EXCEEDED.format(
+                limit=f"{get_settings().max_cost_per_request_usd:.2f}"
+            )
+        )
     await message.answer(texts.REPORT_BUILDING)
 
     async with session_scope() as session:

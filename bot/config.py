@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_dir: str = "logs"
     daily_api_budget_usd: float = 5.0
+    # Жёсткий потолок на одну заявку. В отличие от дневного, этот не
+    # предупреждает, а перестаёт отправлять платные вызовы: одна заявка не
+    # должна съесть весь дневной бюджет.
+    max_cost_per_request_usd: float = 0.5
     gmail_poll_seconds: int = 240
     http_timeout_connect: float = 10.0
     http_timeout_read: float = 60.0

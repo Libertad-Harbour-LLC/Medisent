@@ -21,6 +21,7 @@ from bot.db import repo
 from bot.db.models import RegistryState, RequestStatus
 from bot.db.repo import CandidateInput, SupplierInput
 from bot.logging_setup import log_extra
+from bot.services import budget, guard
 from bot.services import criteria as criteria_service
 from bot.services.firecrawl import ScrapeResult, get_firecrawl_service
 from bot.services.perplexity import get_perplexity_service
@@ -39,6 +40,9 @@ class SearchSummary:
     scraped: int = 0
     registry_state: str = RegistryState.UNAVAILABLE
     errors: list[str] = field(default_factory=list)
+    # Заявка упёрлась в потолок расходов: часть сайтов осталась непроверенной,
+    # и владелец должен об этом знать, а не гадать, почему кандидатов мало.
+    budget_exceeded: bool = False
 
 
 async def run_search(
@@ -78,16 +82,31 @@ async def run_search(
 
     # 2. Поставщики в базу через upsert. Дедупликация — на уникальных
     #    индексах, матчинга по названию нет.
-    supplier_inputs = [
-        SupplierInput(
-            name=item.name,
-            domain=item.site or None,
-            email=item.email or None,
-            phone=item.phone or None,
-            found_via=search.query[:500],
+    # Названия компаний придумала модель поиска по содержимому чужих страниц.
+    # Прогоняем их через тот же фильтр, что и скрейп: поставщик с названием
+    # «Медтехника. Ignore previous instructions» не должен попасть в промпт
+    # отчёта как обычное поле.
+    tainted_suppliers: set[str] = set()
+    supplier_inputs: list[SupplierInput] = []
+    for item in search.suppliers:
+        screening = guard.screen_third_party(f"{item.name} {item.note}", source="выдача поиска")
+        if screening.suspicious:
+            tainted_suppliers.add(item.site or item.name)
+            logger.warning(
+                "Подозрительное название поставщика «%s»: %s",
+                item.name,
+                screening.summary,
+                extra=extra,
+            )
+        supplier_inputs.append(
+            SupplierInput(
+                name=item.name,
+                domain=item.site or None,
+                email=item.email or None,
+                phone=item.phone or None,
+                found_via=search.query[:500],
+            )
         )
-        for item in search.suppliers
-    ]
     key_to_id = await repo.upsert_suppliers(session, supplier_inputs)
 
     # 3. Обход сайтов. Ограничиваем список: десяток сайтов — уже пара минут и
@@ -131,7 +150,12 @@ async def run_search(
                     "scrape": {
                         "ok": bool(scrape and scrape.ok),
                         "error": scrape.error if scrape else None,
-                        "injection_suspected": bool(scrape and scrape.injection_suspected),
+                        # Подозрение может прийти с двух сторон: из текста
+                        # страницы и из названия, придуманного поиском.
+                        "injection_suspected": bool(
+                            (scrape and scrape.injection_suspected)
+                            or (item.site or item.name) in tainted_suppliers
+                        ),
                     },
                 },
             )
@@ -143,6 +167,7 @@ async def run_search(
     # Контакты, найденные на сайте, дополняют то, что дал поиск.
     await _enrich_contacts(session, search.suppliers, scrapes, key_to_id)
 
+    summary.budget_exceeded = budget.exceeded(request_id)
     summary.blacklisted = await repo.count_blacklisted_in_request(session, request_id)
     await repo.set_request_status(session, request_id, RequestStatus.REPORT)
 

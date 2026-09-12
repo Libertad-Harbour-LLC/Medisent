@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -68,9 +69,61 @@ class CandidateView:
     ru_registry: str | None
     registry_state: str
     unrega_flags: list[str] = field(default_factory=list)
+    # На сайте нашёлся текст, похожий на попытку повлиять на отбор.
+    injection_suspected: bool = False
     rank: int = 0
     reason: str = ""
     concerns: list[str] = field(default_factory=list)
+
+
+# Формулировки, которых в тексте модели быть не должно. «РУ на изделие» —
+# из реестра и про изделие; «поставщик заявляет наличие» — с сайта и про
+# поставщика. Слить их в «поставщик проверен в Росздравнадзоре» запрещено
+# правилом проекта, и одной инструкции в промпте для этого мало: правило,
+# которое повторяют модели, надо проверять кодом.
+FORBIDDEN_CONFLATION = (
+    # Порядок важен: длинные варианты идут первыми, иначе после вырезания
+    # короткого в тексте останется висящее «в Росздравнадзоре».
+    re.compile(
+        r"поставщик\w*\s+(?:\S+\s+){0,2}провер\w+(?:\s+в\s+росздравнадзор\w*)?",
+        re.IGNORECASE,
+    ),
+    re.compile(r"аккредитован\w*\s+(?:в\s+)?росздравнадзор\w*", re.IGNORECASE),
+    re.compile(r"провер\w+\s+(?:в\s+)?росздравнадзор\w*", re.IGNORECASE),
+    re.compile(r"поставщик\w*\s+(?:\S+\s+){0,2}зарегистрирован\w*", re.IGNORECASE),
+)
+
+
+def find_conflation(text: str) -> str | None:
+    """Нашлась ли в тексте модели запрещённая формулировка. Возвращает её."""
+    for pattern in FORBIDDEN_CONFLATION:
+        match = pattern.search(text or "")
+        if match:
+            return match.group(0)
+    return None
+
+
+def scrub_conflation(text: str, *, where: str, request_id: int | None = None) -> str:
+    """Вырезать запрещённую формулировку из текста модели.
+
+    Текст не переписывается: фраза заменяется пометкой, и владелец видит, что
+    модель попыталась сказать то, чего говорить нельзя.
+    """
+    found = find_conflation(text)
+    if not found:
+        return text
+    logger.warning(
+        "Модель попыталась слить поля реестра и сайта в «%s» (%s)",
+        found,
+        where,
+        extra=log_extra(request_id),
+    )
+    cleaned = text
+    for pattern in FORBIDDEN_CONFLATION:
+        cleaned = pattern.sub(
+            "[формулировка убрана: реестр проверяет изделие, не поставщика]", cleaned
+        )
+    return cleaned
 
 
 @dataclass(slots=True)
@@ -178,6 +231,9 @@ async def rank_candidates(
             schema=REPORT_SCHEMA,
             request_id=request_id,
             operation="report.rank",
+            # Названия компаний придумала модель поиска по чужим страницам —
+            # это данные, а не инструкции.
+            untrusted=True,
         )
     except GeminiError as exc:
         logger.error("Ранжирование не удалось: %s", exc, extra=log_extra(request_id))
@@ -200,7 +256,9 @@ async def rank_candidates(
             logger.warning("Модель вернула неизвестный id=%r", candidate_id)
             continue
         matched.rank = int(row.get("rank") or 0)
-        matched.reason = str(row.get("reason") or "").strip()
+        matched.reason = scrub_conflation(
+            str(row.get("reason") or "").strip(), where="reason", request_id=request_id
+        )
         concerns = row.get("concerns") or []
         matched.concerns = (
             [str(c) for c in concerns if str(c).strip()] if isinstance(concerns, list) else []
@@ -218,7 +276,9 @@ async def rank_candidates(
     missing = parsed.get("missing_data") or []
     return (
         ordered,
-        str(parsed.get("summary") or "").strip(),
+        scrub_conflation(
+            str(parsed.get("summary") or "").strip(), where="summary", request_id=request_id
+        ),
         [str(m) for m in missing if str(m).strip()] if isinstance(missing, list) else [],
         False,
     )
@@ -252,6 +312,8 @@ def render(report: Report) -> list[str]:
 
         if view.unrega_flags:
             lines.append(f"   ⚠️ Информационные письма: {len(view.unrega_flags)}")
+        if view.injection_suspected:
+            lines.append(f"   {texts.INJECTION_SUSPECTED}")
         if view.reason:
             lines.append(f"   <i>{view.reason}</i>")
         for concern in view.concerns:
