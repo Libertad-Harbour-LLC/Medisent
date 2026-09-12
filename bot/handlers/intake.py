@@ -11,10 +11,8 @@ from aiogram.types import Message
 from bot import texts
 from bot.config import get_settings
 from bot.db import repo
-from bot.db.models import RequestStatus
 from bot.db.session import session_scope
-from bot.pipeline import build_report, run_search
-from bot.services import budget
+from bot.pipeline import build_report, close_request, run_search
 from bot.services.gemini import GeminiError, ProductRequest, get_gemini_service
 from bot.services.mail import MailError, get_mail_service
 from bot.services.report import render
@@ -81,15 +79,13 @@ async def _start_pipeline(message: Message, parsed: ProductRequest, input_kind: 
             else texts.search_failed("; ".join(summary.errors) or "сервис не ответил")
         )
         async with session_scope() as session:
-            await repo.set_request_status(session, request_id, RequestStatus.CLOSED)
-        budget.forget(request_id)
+            await close_request(session, request_id)
         return
 
     if summary.total_found == 0:
         await message.answer(texts.SEARCH_NOTHING)
         async with session_scope() as session:
-            await repo.set_request_status(session, request_id, RequestStatus.CLOSED)
-        budget.forget(request_id)
+            await close_request(session, request_id)
         return
 
     await message.answer(texts.search_found(summary.total_found, summary.blacklisted))

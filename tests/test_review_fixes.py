@@ -916,3 +916,124 @@ async def test_failed_search_is_reported_as_a_failure(
             await session.execute(__import__("sqlalchemy").text("select status from requests"))
         ).scalar()
         assert closed == RequestStatus.CLOSED
+
+
+# --- №17: статус меняется только по таблице переходов -----------------------
+
+
+@needs_db
+async def test_cancel_during_report_is_not_overwritten(
+    db: async_sessionmaker[AsyncSession],
+) -> None:
+    """/cancel пришёл, пока собирался отчёт. Раньше build_report безусловно
+    писал awaiting_choice поверх closed, и закрытая заявка снова ждала выбора."""
+    from bot.db.models import RequestStatus
+
+    async with db() as session:
+        request = await repo.create_request(session, product="Т", raw_input="", input_kind="text")
+        rid = int(request.id)
+        assert await repo.transition(session, rid, RequestStatus.REPORT) is True
+        assert await repo.transition(session, rid, RequestStatus.CLOSED) is True
+        # Конвейер доходит до конца уже после отмены.
+        assert await repo.transition(session, rid, RequestStatus.AWAITING_CHOICE) is False
+        await session.commit()
+        fresh = await repo.get_request(session, rid)
+        assert fresh is not None and fresh.status == RequestStatus.CLOSED
+        assert await repo.list_requests_awaiting_choice(session) == []
+
+
+@needs_db
+async def test_transitions_follow_the_table(db: async_sessionmaker[AsyncSession]) -> None:
+    from bot.db.models import RequestStatus
+
+    async with db() as session:
+        request = await repo.create_request(session, product="Т", raw_input="", input_kind="text")
+        rid = int(request.id)
+        # Из search сразу в awaiting_reply нельзя.
+        assert await repo.transition(session, rid, RequestStatus.AWAITING_REPLY) is False
+        for step in (
+            RequestStatus.REPORT,
+            RequestStatus.AWAITING_CHOICE,
+            RequestStatus.AWAITING_REPLY,
+            RequestStatus.KP,
+            RequestStatus.KP,  # второй ответ того же поставщика
+            RequestStatus.CLOSED,
+        ):
+            assert await repo.transition(session, rid, step) is True, step
+        with pytest.raises(ValueError):
+            await repo.transition(session, rid, "mail_sent")
+
+
+# --- №13: антифлуд не глотает нажатия кнопок -------------------------------
+
+
+async def test_throttle_lets_callbacks_through_and_collapses_albums() -> None:
+    from types import SimpleNamespace
+
+    from aiogram.types import CallbackQuery, Message
+
+    from bot.middleware import ThrottleMiddleware
+
+    seen: list[str] = []
+
+    async def handler(event: Any, data: dict[str, Any]) -> str:
+        seen.append(type(event).__name__)
+        return "ok"
+
+    throttle = ThrottleMiddleware(interval=60.0)
+    user = SimpleNamespace(id=42)
+    message = Message.model_construct(message_id=1, media_group_id=None)
+    callback = CallbackQuery.model_construct(id="c1")
+
+    assert await throttle(handler, message, {"event_from_user": user}) == "ok"
+    # Тап «Да» через полсекунды после сообщения — доходит.
+    assert await throttle(handler, callback, {"event_from_user": user}) == "ok"
+    # Второе сообщение внутри интервала — отбрасывается, как и раньше.
+    assert await throttle(handler, message, {"event_from_user": user}) is None
+
+    album = ThrottleMiddleware(interval=0.0)
+    first = Message.model_construct(message_id=2, media_group_id="alb")
+    second = Message.model_construct(message_id=3, media_group_id="alb")
+    assert await album(handler, first, {"event_from_user": user}) == "ok"
+    assert await album(handler, second, {"event_from_user": user}) is None
+
+
+# --- №10: один нормализатор домена ------------------------------------------
+
+
+def test_search_dedupes_by_the_same_key_the_database_uses() -> None:
+    from bot.services.domains import normalise_domain
+    from bot.services.perplexity import _parse_suppliers, domain_of
+
+    assert domain_of("https://medtech.ru#contacts") == normalise_domain("https://medtech.ru/")
+    assert domain_of("medtech.ru.") == "medtech.ru"
+    suppliers = _parse_suppliers(
+        '{"suppliers": [{"name": "A", "site": "https://medtech.ru/"}, '
+        '{"name": "B", "site": "https://medtech.ru#contacts"}]}',
+        citations=["https://www.medtech.ru."],
+    )
+    assert [s.site for s in suppliers] == ["https://medtech.ru/"]
+
+
+@needs_db
+async def test_upsert_survives_duplicate_domains_in_one_batch(
+    db: async_sessionmaker[AsyncSession],
+) -> None:
+    """Раньше два входа с одним lower(domain) в одном пакете роняли весь
+    поиск: «ON CONFLICT DO UPDATE command cannot affect row a second time»."""
+    from bot.db.repo import SupplierInput
+
+    async with db() as session:
+        ids = await repo.upsert_suppliers(
+            session,
+            [
+                SupplierInput(name="ООО Медтех", domain="https://medtech.ru/", email=None),
+                SupplierInput(name="medtech.ru", domain="medtech.ru#top", email="s@medtech.ru"),
+            ],
+        )
+        await session.commit()
+        assert list(ids) == ["medtech.ru"]
+        supplier = await repo.get_supplier(session, ids["medtech.ru"])
+        assert supplier is not None
+        assert supplier.name == "ООО Медтех", "первое имя остаётся"
+        assert supplier.email == "s@medtech.ru", "пустое поле дополняется вторым входом"

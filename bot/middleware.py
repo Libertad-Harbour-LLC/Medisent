@@ -54,6 +54,7 @@ class ThrottleMiddleware(BaseMiddleware):
     def __init__(self, interval: float = 1.0) -> None:
         self.interval = interval
         self._last: dict[int, float] = {}
+        self._last_album: dict[int, str] = {}
 
     async def __call__(
         self,
@@ -61,12 +62,25 @@ class ThrottleMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        # Нажатие кнопки — не флуд: одобрение и так одноразовое в базе, а
+        # проглоченный callback оставлял владельцу вечно крутящуюся кнопку.
+        if isinstance(event, CallbackQuery):
+            return await handler(event, data)
+
         user: User | None = data.get("event_from_user")
         if user is not None:
+            # Альбом из нескольких фото приходит отдельными сообщениями за
+            # миллисекунды. Это один запрос: первое фото идёт в подбор,
+            # остальные кадры того же альбома отбрасываются сознательно.
+            album = event.media_group_id if isinstance(event, Message) else None
+            if album and self._last_album.get(user.id) == album:
+                return None
             now = time.monotonic()
             previous = self._last.get(user.id, 0.0)
             if now - previous < self.interval:
                 logger.debug("Пропущено сообщение по антифлуду от %s", user.id)
                 return None
             self._last[user.id] = now
+            if album:
+                self._last_album[user.id] = album
         return await handler(event, data)

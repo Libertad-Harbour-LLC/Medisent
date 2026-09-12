@@ -321,12 +321,15 @@ async def test_request_status_transitions(session: AsyncSession) -> None:
     request = await repo.create_request(session, product="Т", raw_input="", input_kind="text")
     assert request.status == RequestStatus.SEARCH
 
-    await repo.set_request_status(session, int(request.id), RequestStatus.AWAITING_CHOICE)
+    assert await repo.transition(session, int(request.id), RequestStatus.REPORT) is True
+    assert await repo.transition(session, int(request.id), RequestStatus.AWAITING_CHOICE) is True
     await session.commit()
 
     active = await repo.get_active_request(session)
     assert active is not None and active.status == RequestStatus.AWAITING_CHOICE
 
-    await repo.set_request_status(session, int(request.id), RequestStatus.CLOSED)
+    assert await repo.transition(session, int(request.id), RequestStatus.CLOSED) is True
     await session.commit()
     assert await repo.get_active_request(session) is None
+    # Закрытая заявка никуда больше не переходит.
+    assert await repo.transition(session, int(request.id), RequestStatus.REPORT) is False

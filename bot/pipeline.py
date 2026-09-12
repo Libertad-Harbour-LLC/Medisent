@@ -192,7 +192,7 @@ async def run_search(
         # Контакты, найденные на сайте, дополняют то, что дал поиск.
         await _enrich_contacts(session, search.suppliers, scrapes, key_to_id)
         summary.blacklisted = await repo.count_blacklisted_in_request(session, request_id)
-        await repo.set_request_status(session, request_id, RequestStatus.REPORT)
+        await repo.transition(session, request_id, RequestStatus.REPORT)
 
     summary.budget_exceeded = budget.exceeded(request_id)
     logger.info(
@@ -205,6 +205,13 @@ async def run_search(
         extra=extra,
     )
     return summary
+
+
+async def close_request(session: AsyncSession, request_id: int) -> bool:
+    """Закрыть заявку и забыть её счётчик расходов. Единственный путь в closed."""
+    closed = await repo.transition(session, request_id, RequestStatus.CLOSED)
+    budget.forget(request_id)
+    return closed
 
 
 async def _nothing() -> list[ScrapeResult]:
@@ -322,7 +329,7 @@ async def build_report(
     await repo.set_candidate_ranks(
         session, {view.candidate_id: index for index, view in enumerate(ordered, start=1)}
     )
-    await repo.set_request_status(session, request_id, RequestStatus.AWAITING_CHOICE)
+    await repo.transition(session, request_id, RequestStatus.AWAITING_CHOICE)
     return Report(
         request_token=token,
         product=product,

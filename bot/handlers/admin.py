@@ -10,9 +10,8 @@ from aiogram.types import Message
 
 from bot import texts
 from bot.db import repo
-from bot.db.models import RequestStatus
 from bot.db.session import session_scope
-from bot.services import budget
+from bot.pipeline import close_request
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
@@ -72,9 +71,7 @@ async def cmd_cancel(message: Message) -> None:
         if request is None:
             await message.answer(texts.SESSION_NONE)
             return
-        request_id = int(request.id)
-        await repo.set_request_status(session, request_id, RequestStatus.CLOSED)
-    budget.forget(request_id)
+        await close_request(session, int(request.id))
     await message.answer(texts.CANCELLED)
 
 

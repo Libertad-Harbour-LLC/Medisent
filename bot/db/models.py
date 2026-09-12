@@ -66,10 +66,24 @@ class RequestStatus:
     SEARCH = "search"
     REPORT = "report"
     AWAITING_CHOICE = "awaiting_choice"
-    MAIL_SENT = "mail_sent"
     AWAITING_REPLY = "awaiting_reply"
     KP = "kp"
     CLOSED = "closed"
+
+
+# Откуда куда заявка может перейти. Статус меняется только через
+# ``repo.transition`` с проверкой текущего: раньше это был безусловный
+# UPDATE из шести мест, и /cancel во время сборки отчёта перезаписывался
+# на awaiting_choice, а закрытая заявка снова ждала выбора.
+ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
+    RequestStatus.SEARCH: frozenset({RequestStatus.REPORT, RequestStatus.CLOSED}),
+    RequestStatus.REPORT: frozenset({RequestStatus.AWAITING_CHOICE, RequestStatus.CLOSED}),
+    RequestStatus.AWAITING_CHOICE: frozenset({RequestStatus.AWAITING_REPLY, RequestStatus.CLOSED}),
+    RequestStatus.AWAITING_REPLY: frozenset({RequestStatus.KP, RequestStatus.CLOSED}),
+    # Второй ответ того же поставщика оставляет заявку в kp.
+    RequestStatus.KP: frozenset({RequestStatus.KP, RequestStatus.CLOSED}),
+    RequestStatus.CLOSED: frozenset(),
+}
 
 
 class QuoteStatus:

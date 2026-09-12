@@ -23,6 +23,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import (
+    ALLOWED_TRANSITIONS,
     ApiCall,
     Approval,
     ApprovalDecision,
@@ -39,6 +40,10 @@ from bot.db.models import (
     RequestStatus,
     Supplier,
 )
+
+# Реэкспорт: ключи дедупликации считаются одной функцией и здесь, и в поиске.
+from bot.services.domains import normalise_domain as normalise_domain
+from bot.services.domains import normalise_tax_id as normalise_tax_id
 
 logger = logging.getLogger(__name__)
 
@@ -132,8 +137,26 @@ async def list_requests_awaiting_choice(session: AsyncSession) -> list[Request]:
     )
 
 
-async def set_request_status(session: AsyncSession, request_id: int, status: str) -> None:
-    await session.execute(update(Request).where(Request.id == request_id).values(status=status))
+async def transition(session: AsyncSession, request_id: int, to: str) -> bool:
+    """Перевести заявку в статус ``to``, если из текущего это разрешено.
+
+    Проверка и запись — одним UPDATE по ``ALLOWED_TRANSITIONS``: между SELECT
+    статуса и UPDATE помещается /cancel владельца. ``False`` — переход не
+    сделан; вызывающий решает, что это значит (обычно — заявку уже закрыли).
+    """
+    allowed_from = [status for status, targets in ALLOWED_TRANSITIONS.items() if to in targets]
+    if not allowed_from:
+        raise ValueError(f"в статус {to!r} не ведёт ни один переход")
+    result = await session.execute(
+        update(Request)
+        .where(Request.id == request_id)
+        .where(Request.status.in_(allowed_from))
+        .values(status=to)
+    )
+    moved = bool(result.rowcount)
+    if not moved:
+        logger.warning("Заявка %s: переход в %s не разрешён из текущего статуса", request_id, to)
+    return moved
 
 
 # --- Поставщики ----------------------------------------------------------
@@ -152,33 +175,6 @@ class SupplierInput:
     found_via: str | None = None
 
 
-def normalise_domain(value: str | None) -> str | None:
-    """``https://WWW.Example.RU/catalog?x=1`` → ``example.ru``.
-
-    Уникальный индекс стоит на ``lower(domain)``, но срезать схему, ``www.``
-    и путь база за нас не станет — это делается здесь, до записи.
-    """
-    if not value:
-        return None
-    cleaned = value.strip().lower()
-    for prefix in ("https://", "http://"):
-        if cleaned.startswith(prefix):
-            cleaned = cleaned[len(prefix) :]
-    cleaned = cleaned.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
-    if cleaned.startswith("www."):
-        cleaned = cleaned[4:]
-    cleaned = cleaned.rstrip(".")
-    return cleaned or None
-
-
-def normalise_tax_id(value: str | None) -> str | None:
-    """ИНН — только цифры. 10 знаков у юрлица, 12 у ИП; иное отбрасываем."""
-    if not value:
-        return None
-    digits = "".join(ch for ch in value if ch.isdigit())
-    return digits if len(digits) in (10, 12) else None
-
-
 async def upsert_suppliers(session: AsyncSession, suppliers: list[SupplierInput]) -> dict[str, int]:
     """Пакетно пишет поставщиков и возвращает ``{ключ: id}``.
 
@@ -192,8 +188,12 @@ async def upsert_suppliers(session: AsyncSession, suppliers: list[SupplierInput]
     if not suppliers:
         return {}
 
-    by_domain: list[dict[str, Any]] = []
-    by_tax: list[dict[str, Any]] = []
+    # Внутри одного пакета ключ должен быть уникален: две строки с одним
+    # lower(domain) в одном INSERT … ON CONFLICT DO UPDATE Postgres отвергает
+    # целиком («cannot affect row a second time»). Повторы схлопываются
+    # здесь, непустые поля дополняют друг друга.
+    by_domain_map: dict[str, dict[str, Any]] = {}
+    by_tax_map: dict[str, dict[str, Any]] = {}
     plain: list[dict[str, Any]] = []
 
     for item in suppliers:
@@ -207,11 +207,13 @@ async def upsert_suppliers(session: AsyncSession, suppliers: list[SupplierInput]
             "found_via": item.found_via,
         }
         if payload["domain"]:
-            by_domain.append(payload)
+            _merge_into(by_domain_map, payload["domain"], payload)
         elif payload["tax_id"]:
-            by_tax.append(payload)
+            _merge_into(by_tax_map, payload["tax_id"], payload)
         else:
             plain.append(payload)
+    by_domain = list(by_domain_map.values())
+    by_tax = list(by_tax_map.values())
 
     result: dict[str, int] = {}
 
@@ -252,6 +254,17 @@ async def upsert_suppliers(session: AsyncSession, suppliers: list[SupplierInput]
             result[str(plain_row.name)] = int(plain_row.id)
 
     return result
+
+
+def _merge_into(bucket: dict[str, dict[str, Any]], key: str, payload: dict[str, Any]) -> None:
+    """Второе появление того же ключа в пакете дополняет пустые поля первого."""
+    existing = bucket.get(key)
+    if existing is None:
+        bucket[key] = payload
+        return
+    for field_name, value in payload.items():
+        if existing.get(field_name) in (None, "") and value not in (None, ""):
+            existing[field_name] = value
 
 
 async def get_supplier(session: AsyncSession, supplier_id: int) -> Supplier | None:

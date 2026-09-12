@@ -323,7 +323,7 @@ async def on_mail_decision(callback: CallbackQuery) -> None:
             approval_id,
             {"message_id": message_id, "thread_id": thread_id, "quote_id": quote_id},
         )
-        await repo.set_request_status(session, request_id, RequestStatus.AWAITING_REPLY)
+        await repo.transition(session, request_id, RequestStatus.AWAITING_REPLY)
 
     await _reply(callback, texts.MAIL_SENT)
 
@@ -491,7 +491,7 @@ async def on_kp_decision(callback: CallbackQuery) -> None:
 
     async with session_scope() as session:
         await repo.mark_approval_applied(session, approval_id, {"pdf": str(out_path)})
-        await repo.set_request_status(session, request_id, RequestStatus.KP)
+        await repo.transition(session, request_id, RequestStatus.KP)
 
     if callback.message is not None and isinstance(callback.message, Message):
         await callback.message.answer_document(

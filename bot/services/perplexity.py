@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from bot.config import get_settings
 from bot.logging_setup import log_extra
 from bot.services import pricing
+from bot.services.domains import normalise_domain
 from bot.services.http import ApiClient
 
 logger = logging.getLogger(__name__)
@@ -100,12 +101,8 @@ FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 
 def domain_of(url: str) -> str:
-    cleaned = url.strip().lower()
-    for prefix in ("https://", "http://"):
-        if cleaned.startswith(prefix):
-            cleaned = cleaned[len(prefix) :]
-    cleaned = cleaned.split("/", 1)[0].split("?", 1)[0]
-    return cleaned[4:] if cleaned.startswith("www.") else cleaned
+    """Ключ дедупликации выдачи — ровно тот же, что и у записи в базу."""
+    return normalise_domain(url) or ""
 
 
 def is_supplier_domain(url: str) -> bool:

@@ -241,7 +241,7 @@ async def _handle_incoming(bot: Bot, gmail_message_id: str) -> None:
             session, quote_id, reply_text=full.body, thread_id=full.thread_id
         )
         if request_id:
-            await repo.set_request_status(session, request_id, RequestStatus.KP)
+            await repo.transition(session, request_id, RequestStatus.KP)
 
     # Хвост: вложения и разбор цен. Владелец уже видел письмо, поэтому сбой
     # здесь не повод разбирать письмо заново — только сказать об этом.

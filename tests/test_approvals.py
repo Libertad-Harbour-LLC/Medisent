@@ -321,13 +321,16 @@ async def test_awaiting_choice_returns_only_waiting_requests(session: AsyncSessi
 
     first = await repo.create_request(session, product="A", raw_input="", input_kind="text")
     second = await repo.create_request(session, product="B", raw_input="", input_kind="text")
-    await repo.set_request_status(session, int(first.id), RequestStatus.AWAITING_CHOICE)
+    # Статус идёт по таблице переходов: search → report → awaiting_choice.
+    await repo.transition(session, int(first.id), RequestStatus.REPORT)
+    await repo.transition(session, int(first.id), RequestStatus.AWAITING_CHOICE)
     await session.commit()
 
     waiting = await repo.list_requests_awaiting_choice(session)
     assert [r.id for r in waiting] == [first.id]
 
-    await repo.set_request_status(session, int(second.id), RequestStatus.AWAITING_CHOICE)
+    await repo.transition(session, int(second.id), RequestStatus.REPORT)
+    await repo.transition(session, int(second.id), RequestStatus.AWAITING_CHOICE)
     await session.commit()
     waiting = await repo.list_requests_awaiting_choice(session)
     assert len(waiting) == 2, "две заявки ждут выбора — угадывать нельзя, надо спросить"
