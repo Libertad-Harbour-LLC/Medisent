@@ -1,0 +1,13 @@
+{
+  "content": [
+    {
+      "id": "a1b2c3",
+      "registrationNumber": "РЗН 2025/24118",
+      "name": "Аппарат ИВЛ портативный, модель X-200",
+      "applicantName": "ООО «МедТехника Плюс»",
+      "status": "Действует",
+      "registrationDate": "2025-06-14"
+    }
+  ],
+  "totalElements": 1
+}

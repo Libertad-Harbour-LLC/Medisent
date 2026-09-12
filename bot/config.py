@@ -1,0 +1,141 @@
+"""Конфигурация из окружения. Ключей в коде нет — только имена переменных.
+
+Отсутствие ключей Perplexity и Firecrawl запуску не мешает: это требование
+приёмки этапа 0. Бот пишет предупреждение в лог и продолжает работу.
+"""
+
+from __future__ import annotations
+
+import logging
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+class Settings(BaseSettings):
+    """Все настройки бота. Читаются из окружения или из .env рядом с проектом."""
+
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    # --- Telegram -------------------------------------------------------
+    telegram_bot_token: str
+    telegram_owner_id: int
+
+    # --- База -----------------------------------------------------------
+    database_url: str
+
+    # --- Gemini ---------------------------------------------------------
+    gemini_api_key: str = ""
+    llm_report_model: str = "gemini-flash-latest"
+    llm_email_model: str = "gemini-flash-latest"
+
+    # --- Поиск и скрейпинг ----------------------------------------------
+    perplexity_api_key: str = ""
+    firecrawl_api_key: str = ""
+
+    # --- Gmail ----------------------------------------------------------
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_refresh_token: str = ""
+    gmail_sender: str = ""
+    forward_to_email: str = ""
+
+    # --- Реестры --------------------------------------------------------
+    registry_elk_base: str = "https://elk.roszdravnadzor.gov.ru"
+    registry_misearch_url: str = "https://roszdravnadzor.gov.ru/services/misearch"
+    registry_unrega_url: str = "https://roszdravnadzor.gov.ru/services/unrega"
+    registry_cache_days: int = 30
+
+    # --- Эксплуатация ---------------------------------------------------
+    log_level: str = "INFO"
+    log_dir: str = "logs"
+    daily_api_budget_usd: float = 5.0
+    gmail_poll_seconds: int = 240
+    http_timeout_connect: float = 10.0
+    http_timeout_read: float = 60.0
+    http_max_retries: int = 3
+    scrape_concurrency: int = 5
+
+    prompt_guard_enabled: bool = False
+
+    prompts_dir: Path = Field(default=PROJECT_ROOT / "prompts")
+    kp_builder_dir: Path = Field(default=PROJECT_ROOT / "skills" / "kp-builder")
+
+    @field_validator("database_url")
+    @classmethod
+    def _require_async_driver(cls, value: str) -> str:
+        """Приложение работает через asyncpg; синхронный URL молча не подставляем."""
+        if value.startswith("postgresql://"):
+            return value.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if not value.startswith("postgresql+asyncpg://"):
+            raise ValueError(
+                "DATABASE_URL должен начинаться с postgresql:// или postgresql+asyncpg://"
+            )
+        return value
+
+    @field_validator("gmail_poll_seconds")
+    @classmethod
+    def _sane_poll_interval(cls, value: int) -> int:
+        if value < 60:
+            raise ValueError("GMAIL_POLL_SECONDS ниже 60 с упрётся в квоты Gmail API")
+        return value
+
+    # --- Производные признаки -------------------------------------------
+
+    @property
+    def sync_database_url(self) -> str:
+        """URL для Alembic в offline-режиме: там asyncpg не работает."""
+        return self.database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+    @property
+    def search_enabled(self) -> bool:
+        return bool(self.perplexity_api_key)
+
+    @property
+    def scrape_enabled(self) -> bool:
+        return bool(self.firecrawl_api_key)
+
+    @property
+    def gemini_enabled(self) -> bool:
+        return bool(self.gemini_api_key)
+
+    @property
+    def gmail_enabled(self) -> bool:
+        return bool(
+            self.google_client_id
+            and self.google_client_secret
+            and self.google_refresh_token
+            and self.gmail_sender
+        )
+
+    def warn_about_missing_keys(self) -> list[str]:
+        """Возвращает список предупреждений и пишет их в лог. Запуск не прерывает."""
+        warnings: list[str] = []
+        if not self.gemini_enabled:
+            warnings.append("GEMINI_API_KEY не задан — распознавание фото, голоса и файлов выключено")
+        if not self.search_enabled:
+            warnings.append("PERPLEXITY_API_KEY не задан — поиск поставщиков выключен")
+        if not self.scrape_enabled:
+            warnings.append("FIRECRAWL_API_KEY не задан — скрейп сайтов поставщиков выключен")
+        if not self.gmail_enabled:
+            warnings.append("Gmail не настроен — отправка писем и приём ответов выключены")
+        for text in warnings:
+            logger.warning("%s", text)
+        return warnings
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Настройки читаются один раз за процесс."""
+    return Settings()  # type: ignore[call-arg]

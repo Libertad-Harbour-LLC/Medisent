@@ -1,0 +1,23 @@
+# Бот
+aiogram==3.15.0
+
+# База
+SQLAlchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+
+# HTTP ко всем внешним API
+httpx==0.28.1
+
+# Конфигурация и валидация
+pydantic==2.10.4
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+
+# Чтение прайсов поставщиков (этап 8)
+pdfplumber==0.11.4
+
+# Сборка КП (скилл kp-builder)
+Jinja2==3.1.5
+playwright==1.49.1
+pillow==11.1.0

@@ -1,0 +1,62 @@
+# Локальный запуск. В проде (Railway) единого compose нет: платформа собирает
+# образ из Dockerfile и запускает сервисы по отдельности, а postgres и mathesar
+# берутся как managed-сервисы платформы. См. CLAUDE.md, раздел «Хостинг».
+
+services:
+  bot:
+    build:
+      context: .
+      target: runtime
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://medisent:medisent@postgres:5432/medisent
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - ./skills/kp-builder/assets:/app/skills/kp-builder/assets:ro
+      - kp_out:/app/skills/kp-builder/out
+      - logs:/app/logs
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: medisent
+      POSTGRES_USER: medisent
+      POSTGRES_PASSWORD: medisent
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U medisent -d medisent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Веб-доступ к тем же таблицам. Отдельного хранилища не создаёт.
+  mathesar:
+    image: mathesar/mathesar-prod:latest
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: medisent
+      POSTGRES_USER: medisent
+      POSTGRES_PASSWORD: medisent
+      SECRET_KEY: ${MATHESAR_SECRET_KEY:-change-me-locally-only}
+    ports:
+      - "8080:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  kp_out:
+  logs:
