@@ -47,6 +47,9 @@ async def _start_pipeline(message: Message, parsed: ProductRequest, input_kind: 
             input_kind=input_kind,
         )
         request_id, token = int(request.id), request.token
+        # Распознавание шло до заявки — его расход приписывается ей задним
+        # числом, чтобы потолок на заявку и /stats видели полную цену.
+        await repo.attach_orphan_api_calls(session, request_id, operation_prefix="intake.")
 
     await message.answer(
         texts.intake_recognised(parsed.product, parsed.qty, token), parse_mode="HTML"
@@ -64,6 +67,24 @@ async def _start_pipeline(message: Message, parsed: ProductRequest, input_kind: 
         requirements=parsed.requirements,
     )
 
+    budget_note = texts.BUDGET_PER_REQUEST_EXCEEDED.format(
+        limit=f"{get_settings().max_cost_per_request_usd:.2f}"
+    )
+
+    # Три разных исхода, и говорить о них надо по-разному: поиск упал (виноват
+    # сервис или потолок, а не название), поиск честно ничего не дал, поиск
+    # что-то дал. Раньше первые два сливались в «уточните название».
+    if summary.search_failed:
+        await message.answer(
+            budget_note
+            if summary.budget_exceeded
+            else texts.search_failed("; ".join(summary.errors) or "сервис не ответил")
+        )
+        async with session_scope() as session:
+            await repo.set_request_status(session, request_id, RequestStatus.CLOSED)
+        budget.forget(request_id)
+        return
+
     if summary.total_found == 0:
         await message.answer(texts.SEARCH_NOTHING)
         async with session_scope() as session:
@@ -73,11 +94,7 @@ async def _start_pipeline(message: Message, parsed: ProductRequest, input_kind: 
 
     await message.answer(texts.search_found(summary.total_found, summary.blacklisted))
     if summary.budget_exceeded:
-        await message.answer(
-            texts.BUDGET_PER_REQUEST_EXCEEDED.format(
-                limit=f"{get_settings().max_cost_per_request_usd:.2f}"
-            )
-        )
+        await message.answer(budget_note)
     await message.answer(texts.REPORT_BUILDING)
 
     async with session_scope() as session:

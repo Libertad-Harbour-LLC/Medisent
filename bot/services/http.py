@@ -39,6 +39,21 @@ MAX_BACKOFF_SECONDS = 30.0
 
 
 @dataclass(slots=True)
+class Usage:
+    """Что вызов стоил, когда цена известна только по ответу (токены модели)."""
+
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    cached_tokens: int | None = None
+    cost_usd: Decimal | None = None
+
+
+# Считает Usage по разобранному JSON ответа. Вызывается один раз на удачный
+# вызов; ошибка внутри не роняет вызов, а лишь оставляет строку без цены.
+PriceFn = Callable[[Any], Usage]
+
+
+@dataclass(slots=True)
 class CallResult:
     """Итог вызова. Исключения наружу не летят — сервисы разбирают поля."""
 
@@ -60,12 +75,21 @@ class CallResult:
 # Куда писать строку расхода. По умолчанию — в базу; тесты подменяют.
 MeterFn = Callable[..., Awaitable[None]]
 _meter: MeterFn | None = None
+# Фоновые записи в api_calls: учёт не стоит в критическом пути вызова, но
+# при остановке бота дописывается до конца (``flush_meter``).
+_pending: set[asyncio.Task[None]] = set()
 
 
 def set_meter(fn: MeterFn | None) -> None:
     """Подменить приёмник учёта расходов (используется в тестах)."""
     global _meter
     _meter = fn
+
+
+async def flush_meter() -> None:
+    """Дождаться фоновых записей учёта. Вызывается при остановке."""
+    if _pending:
+        await asyncio.gather(*_pending, return_exceptions=True)
 
 
 async def _record(
@@ -80,7 +104,15 @@ async def _record(
     duration_ms: int,
     cached_tokens: int | None = None,
 ) -> None:
-    """Пишет строку в api_calls. Сбой учёта не должен ронять основную работу."""
+    """Единственный счётчик расходов.
+
+    Сначала — потолок на заявку в памяти (он должен вырасти до следующего
+    вызова, а не после записи в базу), потом строка в ``api_calls``. Сбой
+    учёта не должен ронять основную работу.
+    """
+    if status == "ok":
+        budget.record(request_id, cost_usd)
+
     if _meter is not None:
         await _meter(
             service=service,
@@ -95,24 +127,33 @@ async def _record(
         )
         return
 
+    task = asyncio.create_task(
+        _write_api_call(
+            service=service,
+            operation=operation,
+            request_id=request_id,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost_usd=cost_usd,
+            status=status,
+            duration_ms=duration_ms,
+            cached_tokens=cached_tokens,
+        )
+    )
+    _pending.add(task)
+    task.add_done_callback(_pending.discard)
+
+
+async def _write_api_call(**fields: Any) -> None:
+    """Строка в api_calls своей короткой сессией, вне запроса, который её породил."""
     try:
         from bot.db import repo
         from bot.db.session import session_scope
 
         async with session_scope() as session:
-            await repo.record_api_call(
-                session,
-                service=service,
-                operation=operation,
-                request_id=request_id,
-                tokens_in=tokens_in,
-                tokens_out=tokens_out,
-                cost_usd=cost_usd,
-                status=status,
-                duration_ms=duration_ms,
-            )
+            await repo.record_api_call(session, **fields)
     except Exception:
-        logger.exception("Не удалось записать расход по %s", service)
+        logger.exception("Не удалось записать расход по %s", fields.get("service"))
 
 
 def _backoff_seconds(attempt: int, retry_after: str | None) -> float:
@@ -176,6 +217,7 @@ class ApiClient:
         expect_json: bool = True,
         retries: int | None = None,
         redact_body: bool = False,
+        price: PriceFn | None = None,
         **kwargs: Any,
     ) -> CallResult:
         """Один вызов внешнего сервиса.
@@ -186,13 +228,23 @@ class ApiClient:
         ``redact_body=True`` — не класть тело ответа в ``CallResult`` и не
         писать его в лог. Нужно там, где в ответе приходит секрет: обновление
         OAuth-токена возвращает access_token и refresh_token.
+
+        ``price`` — для сервисов, у которых цена известна только по ответу
+        (токены модели): считает ``Usage`` по разобранному JSON, и вызов
+        пишется в ``api_calls`` одной строкой с ценой. Такой вызов тоже
+        платный: потолок на заявку проверяет его по уже потраченному.
         """
         started = time.monotonic()
         max_retries = self.max_retries if retries is None else retries
 
         # Потолок на заявку проверяется до вызова, а не после: смысл в том,
         # чтобы деньги не ушли, а не в том, чтобы узнать об этом первым.
-        if cost_usd and not await budget.allow(request_id, cost_usd):
+        allowed = (
+            await budget.allow(request_id, cost_usd)
+            if cost_usd
+            else (await budget.allow_unpriced(request_id) if price is not None else True)
+        )
+        if not allowed:
             logger.warning(
                 "%s %s не отправлен: исчерпан потолок на заявку",
                 self.service,
@@ -257,15 +309,27 @@ class ApiClient:
                     attempt,
                     extra=extra,
                 )
+                usage = Usage(tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd)
+                if price is not None:
+                    try:
+                        usage = price(payload)
+                    except Exception:
+                        logger.exception(
+                            "%s %s: не удалось посчитать стоимость по ответу",
+                            self.service,
+                            operation or url,
+                            extra=extra,
+                        )
                 await _record(
                     service=self.service,
                     operation=operation,
                     request_id=request_id,
-                    tokens_in=tokens_in,
-                    tokens_out=tokens_out,
-                    cost_usd=cost_usd,
+                    tokens_in=usage.tokens_in,
+                    tokens_out=usage.tokens_out,
+                    cost_usd=usage.cost_usd,
                     status="ok",
                     duration_ms=duration,
+                    cached_tokens=usage.cached_tokens,
                 )
                 return CallResult(
                     ok=True,

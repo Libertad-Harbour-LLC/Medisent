@@ -749,3 +749,170 @@ async def test_headers_are_fetched_as_metadata_and_body_as_full(mail_service: An
     assert client.calls[0]["params"]["format"] == "metadata"
     assert "From" in client.calls[0]["params"]["metadataHeaders"]
     assert client.calls[1]["params"]["format"] == "full"
+
+
+# --- №4: потолок на заявку растёт в процессе, Gemini — одной строкой -------
+
+
+def _json_transport(payload: dict[str, Any], *, base_url: str = "") -> Any:
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=base_url)
+
+
+@pytest.fixture
+def small_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bot.config import get_settings
+    from bot.services import budget
+
+    budget.reset()
+    monkeypatch.setattr(get_settings(), "max_cost_per_request_usd", 0.01)
+
+    async def _zero(request_id: int) -> Any:
+        from decimal import Decimal
+
+        return Decimal(0)
+
+    monkeypatch.setattr(budget, "_seed", _zero)
+    yield
+    budget.reset()
+
+
+async def test_cap_accumulates_through_the_api_client(small_cap: None) -> None:
+    """Раньше budget.record не вызывался нигде: счётчик засевался из базы один
+    раз и в памяти не рос, и потолок срабатывал только после перезапуска."""
+    from decimal import Decimal
+
+    from bot.services.http import ApiClient
+
+    client = ApiClient("firecrawl")
+    client._client = _json_transport({"ok": True})
+
+    first = await client.post("https://x/scrape", request_id=1, cost_usd=Decimal("0.006"))
+    second = await client.post("https://x/scrape", request_id=1, cost_usd=Decimal("0.006"))
+    assert first.ok is True
+    assert second.ok is False and second.budget_exceeded is True
+    await client.aclose()
+
+
+async def test_gemini_call_is_one_row_with_cost_and_cached_tokens(
+    monkeypatch: pytest.MonkeyPatch, metered: list[dict[str, Any]]
+) -> None:
+    """Цена по токенам считается через price-callback и ложится в ту же строку,
+    что и вызов; cached_tokens доезжает до учёта; второй строки «:tokens» нет."""
+    from bot.config import get_settings
+    from bot.services.gemini import API_BASE, GeminiService, Part
+
+    monkeypatch.setattr(get_settings(), "gemini_api_key", "k")
+    service = GeminiService()
+    service._client._client = _json_transport(
+        base_url=API_BASE,
+        payload={
+            "candidates": [{"content": {"parts": [{"text": '{"product": "Тонометр"}'}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 1000,
+                "candidatesTokenCount": 100,
+                "cachedContentTokenCount": 400,
+            },
+        },
+    )
+    parsed = await service.generate_json(
+        parts=[Part(text="x")], system_instruction="y", request_id=5, operation="intake.text"
+    )
+    assert parsed == {"product": "Тонометр"}
+    rows = [m for m in metered if m["service"] == "gemini"]
+    assert len(rows) == 1
+    assert rows[0]["cost_usd"] and rows[0]["cost_usd"] > 0
+    assert rows[0]["cached_tokens"] == 400
+    assert rows[0]["tokens_in"] == 1000 and rows[0]["tokens_out"] == 100
+    await service.aclose()
+
+
+async def test_model_call_is_refused_once_the_cap_is_reached(small_cap: None) -> None:
+    """Вызов модели не имеет цены до ответа — раньше он шёл мимо потолка."""
+    from decimal import Decimal
+
+    from bot.services import budget
+    from bot.services.http import ApiClient, Usage
+
+    budget.record(1, Decimal("0.01"))
+    client = ApiClient("gemini")
+    client._client = _json_transport({})
+    result = await client.post("https://x/gen", request_id=1, price=lambda p: Usage())
+    assert result.ok is False and result.budget_exceeded is True
+    # Бесплатный вызов (реестр, Gmail) потолок не трогает.
+    free = await client.post("https://x/free", request_id=1)
+    assert free.ok is True
+    await client.aclose()
+
+
+@needs_db
+async def test_intake_spend_is_attached_to_the_request_it_produced(
+    db: async_sessionmaker[AsyncSession],
+) -> None:
+    from decimal import Decimal
+
+    async with db() as session:
+        await repo.record_api_call(
+            session,
+            service="gemini",
+            operation="intake.photo:gemini-flash-latest",
+            request_id=None,
+            tokens_in=10,
+            tokens_out=5,
+            cost_usd=Decimal("0.02"),
+            status="ok",
+            duration_ms=1,
+        )
+        await session.commit()
+        request = await repo.create_request(session, product="Т", raw_input="", input_kind="photo")
+        attached = await repo.attach_orphan_api_calls(
+            session, int(request.id), operation_prefix="intake."
+        )
+        await session.commit()
+        assert attached == 1
+        assert await repo.spent_on_request(session, int(request.id)) == Decimal("0.02")
+
+
+# --- №6: упавший поиск — не «ничего не нашёл» --------------------------------
+
+
+class _FakeMessage:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def answer(self, text: str, **kwargs: Any) -> None:
+        self.sent.append(text)
+
+
+@needs_db
+async def test_failed_search_is_reported_as_a_failure(
+    db: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bot.config import get_settings
+    from bot.db.models import RequestStatus
+    from bot.handlers import intake
+    from bot.pipeline import SearchSummary
+    from bot.services.gemini import ProductRequest
+
+    monkeypatch.setattr(get_settings(), "perplexity_api_key", "k")
+
+    async def failing(**kwargs: Any) -> SearchSummary:
+        return SearchSummary(search_failed=True, errors=["HTTP 503: сервер лёг"])
+
+    monkeypatch.setattr(intake, "run_search", failing)
+    message = _FakeMessage()
+    await intake._start_pipeline(message, ProductRequest(product="Тонометр", raw_input="т"), "text")  # type: ignore[arg-type]
+
+    assert texts.SEARCH_NOTHING not in message.sent
+    assert any("Поиск не отработал" in text and "503" in text for text in message.sent)
+    async with db() as session:
+        request = await repo.get_active_request(session)
+        assert request is None, "заявка закрыта, а не висит в search"
+        closed = (
+            await session.execute(__import__("sqlalchemy").text("select status from requests"))
+        ).scalar()
+        assert closed == RequestStatus.CLOSED

@@ -796,6 +796,28 @@ async def record_api_call(
     )
 
 
+async def attach_orphan_api_calls(
+    session: AsyncSession, request_id: int, *, operation_prefix: str, within_seconds: int = 300
+) -> int:
+    """Привязать к заявке свежие вызовы без заявки.
+
+    Распознавание входа (фото, голос, файл) идёт до того, как заявка
+    заведена, и его вызовы пишутся с ``request_id = NULL``. Заводить заявку
+    до распознавания нельзя — нераспознанный ввод плодил бы пустые заявки и
+    жёг номера RFQ. Поэтому после создания заявки её intake-вызовы за
+    последние минуты приписываются ей: владелец один, вводы идут по одному.
+    """
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=within_seconds)
+    result = await session.execute(
+        update(ApiCall)
+        .where(ApiCall.request_id.is_(None))
+        .where(ApiCall.operation.like(f"{operation_prefix}%"))
+        .where(ApiCall.created_at >= cutoff)
+        .values(request_id=request_id)
+    )
+    return int(result.rowcount or 0)
+
+
 async def spent_today(session: AsyncSession) -> Decimal:
     value = await session.scalar(
         select(func.coalesce(func.sum(ApiCall.cost_usd), 0)).where(

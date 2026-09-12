@@ -18,6 +18,7 @@ from bot.middleware import OwnerOnlyMiddleware, ThrottleMiddleware
 from bot.scheduler import start_background_tasks, stop_background_tasks
 from bot.services.firecrawl import close_firecrawl_service
 from bot.services.gemini import close_gemini_service
+from bot.services.http import flush_meter
 from bot.services.mail import close_mail_service
 from bot.services.perplexity import close_perplexity_service
 from bot.services.registry import close_registry_service
@@ -79,6 +80,7 @@ async def main() -> None:
         await close_perplexity_service()
         await close_firecrawl_service()
         await close_mail_service()
+        await flush_meter()  # дописать фоновые строки api_calls до закрытия пула
         await dispose_engine()
         await bot.session.close()
 

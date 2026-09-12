@@ -12,6 +12,8 @@
 
 Счётчик держится в памяти процесса и подсевается из базы при первом обращении
 к заявке: после перезапуска потолок восстанавливается, а не обнуляется.
+Растёт он в ``http._record`` — единственном месте учёта: каждый удачный
+платный вызов добавляет свою цену до того, как уйдёт следующий.
 """
 
 from __future__ import annotations
@@ -60,6 +62,34 @@ async def allow(request_id: int | None, cost: Decimal | None) -> bool:
             _warned.add(request_id)
             logger.warning(
                 "Потолок на заявку исчерпан: потрачено $%s из $%s, вызов не отправлен",
+                _spent[request_id],
+                limit,
+                extra=log_extra(request_id),
+            )
+        return False
+    return True
+
+
+async def allow_unpriced(request_id: int | None) -> bool:
+    """Платный вызов, цена которого известна только по ответу (токены модели).
+
+    Оценить его заранее нечем, поэтому решает уже потраченное: потолок
+    достигнут — вызов не уходит. Иначе вызовы модели шли бы мимо потолка
+    вовсе, а они — самая дорогая часть заявки.
+    """
+    settings = get_settings()
+    limit = Decimal(str(settings.max_cost_per_request_usd))
+    if request_id is None or limit <= 0:
+        return True
+
+    if request_id not in _spent:
+        _spent[request_id] = await _seed(request_id)
+
+    if _spent[request_id] >= limit:
+        if request_id not in _warned:
+            _warned.add(request_id)
+            logger.warning(
+                "Потолок на заявку исчерпан: потрачено $%s из $%s, вызов модели не отправлен",
                 _spent[request_id],
                 limit,
                 extra=log_extra(request_id),

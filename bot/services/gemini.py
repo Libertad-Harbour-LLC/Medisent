@@ -20,7 +20,7 @@ from typing import Any
 from bot.config import get_settings
 from bot.logging_setup import log_extra
 from bot.services import pricing
-from bot.services.http import ApiClient
+from bot.services.http import ApiClient, Usage
 
 logger = logging.getLogger(__name__)
 
@@ -155,37 +155,23 @@ class GeminiService:
         if schema is not None:
             body["generationConfig"]["responseSchema"] = schema
 
+        # Цена известна только по ответу — считается по usageMetadata и
+        # пишется той же строкой api_calls, что и сам вызов. Потолок на
+        # заявку проверяет такой вызов по уже потраченному.
         result = await self._client.post(
             f"/models/{model_name}:generateContent",
             operation=f"{operation}:{model_name}",
             request_id=request_id,
             params={"key": settings.gemini_api_key},
             json=body,
+            price=lambda payload: usage_from_payload(payload, model_name),
         )
         if not result.ok:
+            if result.budget_exceeded:
+                raise GeminiError("исчерпан потолок расходов на заявку")
             raise GeminiError(result.error or "вызов Gemini не удался")
 
         payload = result.json or {}
-        usage = payload.get("usageMetadata", {})
-        tokens_in = int(usage.get("promptTokenCount", 0) or 0)
-        tokens_out = int(usage.get("candidatesTokenCount", 0) or 0)
-
-        # Стоимость дописывается отдельной строкой: во время самого вызова
-        # число токенов ещё неизвестно.
-        if tokens_in or tokens_out:
-            from bot.services.http import _record
-
-            await _record(
-                service="gemini",
-                operation=f"{operation}:{model_name}:tokens",
-                request_id=request_id,
-                tokens_in=tokens_in,
-                tokens_out=tokens_out,
-                cost_usd=pricing.llm_cost(model_name, tokens_in, tokens_out),
-                status="ok",
-                duration_ms=0,
-            )
-
         candidates = payload.get("candidates") or []
         if not candidates:
             reason = payload.get("promptFeedback", {}).get("blockReason")
@@ -335,6 +321,20 @@ class GeminiService:
             request_id=request_id,
             operation=operation or f"prompt.{prompt_name}",
         )
+
+
+def usage_from_payload(payload: Any, model_name: str) -> Usage:
+    """Токены и цена вызова из ``usageMetadata`` ответа Gemini."""
+    meta = (payload or {}).get("usageMetadata", {}) if isinstance(payload, dict) else {}
+    tokens_in = int(meta.get("promptTokenCount", 0) or 0)
+    tokens_out = int(meta.get("candidatesTokenCount", 0) or 0)
+    cached = meta.get("cachedContentTokenCount")
+    return Usage(
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        cached_tokens=int(cached) if cached is not None else None,
+        cost_usd=pricing.llm_cost(model_name, tokens_in, tokens_out),
+    )
 
 
 def _to_product_request(parsed: dict[str, Any], *, raw_input: str) -> ProductRequest:
