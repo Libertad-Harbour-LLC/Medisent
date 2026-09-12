@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; }
+
+  :root {
+    --primary: {{ brand.colors.primary | default('#1a3a5c') }};
+    --accent:  {{ brand.colors.accent  | default('#c8102e') }};
+    --text:    {{ brand.colors.text    | default('#1c1c1c') }};
+    --muted:   {{ brand.colors.muted   | default('#6b7280') }};
+    --line:    {{ brand.colors.line    | default('#dfe3e8') }};
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font-family: {{ brand.font_family | default("'Helvetica Neue', Arial, sans-serif") }};
+    font-size: 10.5pt;
+    line-height: 1.45;
+    color: var(--text);
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .page { padding: 0; }
+
+  /* ---- шапка ---- */
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    border-bottom: 2.5pt solid var(--primary);
+    padding-bottom: 6mm;
+    margin-bottom: 8mm;
+  }
+  .logo { max-height: 18mm; max-width: 62mm; }
+  .req { text-align: right; font-size: 8.5pt; color: var(--muted); line-height: 1.5; }
+  .req strong { color: var(--primary); font-size: 10pt; display: block; margin-bottom: 1mm; }
+
+  /* ---- заголовок и клиент ---- */
+  h1 {
+    font-size: 17pt;
+    color: var(--primary);
+    margin: 0 0 1mm;
+    letter-spacing: -0.2pt;
+  }
+  .meta { font-size: 9pt; color: var(--muted); margin-bottom: 7mm; }
+  .meta b { color: var(--text); font-weight: 600; }
+
+  .client {
+    background: #f6f8fa;
+    border-left: 3pt solid var(--accent);
+    padding: 4mm 5mm;
+    margin-bottom: 7mm;
+  }
+  .client .who { font-size: 8pt; text-transform: uppercase; letter-spacing: 0.6pt; color: var(--muted); }
+  .client .name { font-size: 12pt; font-weight: 600; margin-top: 1mm; }
+  .client .extra { font-size: 9pt; color: var(--muted); margin-top: 1mm; }
+
+  .intro { margin-bottom: 7mm; text-align: justify; }
+
+  /* ---- таблица позиций ---- */
+  table { width: 100%; border-collapse: collapse; margin-bottom: 6mm; }
+  thead { display: table-header-group; }
+  tr { page-break-inside: avoid; }
+  th {
+    background: var(--primary);
+    color: #fff;
+    font-size: 8.5pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4pt;
+    padding: 2.5mm 2mm;
+    text-align: left;
+  }
+  td { padding: 2.5mm 2mm; border-bottom: 0.5pt solid var(--line); vertical-align: top; }
+  tbody tr:nth-child(even) td { background: #fafbfc; }
+  .num { text-align: right; white-space: nowrap; }
+  .idx { color: var(--muted); width: 8mm; }
+  .note { font-size: 8.5pt; color: var(--muted); margin-top: 0.8mm; }
+
+  /* ---- итоги ---- */
+  .totals { page-break-inside: avoid; margin-left: auto; width: 82mm; }
+  .totals div { display: flex; justify-content: space-between; padding: 1.6mm 0; font-size: 10pt; }
+  .totals .sep { border-top: 0.5pt solid var(--line); }
+  .totals .grand {
+    border-top: 1.5pt solid var(--primary);
+    margin-top: 1mm;
+    padding-top: 2.5mm;
+    font-size: 13pt;
+    font-weight: 700;
+    color: var(--primary);
+  }
+  .vat-note { font-size: 8.5pt; color: var(--muted); text-align: right; margin-top: 1mm; }
+
+  /* ---- условия ---- */
+  .terms { page-break-inside: avoid; margin-top: 8mm; }
+  .terms h2 {
+    font-size: 10pt;
+    text-transform: uppercase;
+    letter-spacing: 0.6pt;
+    color: var(--primary);
+    border-bottom: 0.5pt solid var(--line);
+    padding-bottom: 1.5mm;
+    margin: 0 0 3mm;
+  }
+  .terms ul { margin: 0; padding-left: 5mm; }
+  .terms li { margin-bottom: 1.5mm; }
+  .validity { margin-top: 4mm; font-weight: 600; color: var(--accent); }
+
+  /* ---- подпись и печать ---- */
+  .sign {
+    position: relative;
+    margin-top: 14mm;
+    page-break-inside: avoid;
+    min-height: 34mm;
+  }
+  .sign .role { font-size: 9.5pt; color: var(--muted); }
+  .sign .line { width: 62mm; border-top: 0.5pt solid var(--text); margin-top: 17mm; }
+  .sign .who { margin-top: 1mm; font-size: 10.5pt; font-weight: 600; }
+
+  .signature-img {
+    position: absolute;
+    left: {{ brand.signature.offset_x_mm | default(4) }}mm;
+    top: {{ brand.signature.offset_y_mm | default(8) }}mm;
+    height: {{ brand.signature.height_mm | default(16) }}mm;
+    mix-blend-mode: multiply;
+  }
+  .stamp-img {
+    position: absolute;
+    left: {{ brand.stamp.offset_x_mm | default(34) }}mm;
+    top: {{ brand.stamp.offset_y_mm | default(0) }}mm;
+    width: {{ brand.stamp.size_mm | default(38) }}mm;
+    transform: rotate({{ brand.stamp.rotate_deg | default(-7) }}deg);
+    opacity: {{ brand.stamp.opacity | default(0.88) }};
+    mix-blend-mode: multiply;
+  }
+
+  .draft-mark {
+    position: absolute;
+    left: 4mm; top: 12mm;
+    font-size: 9pt;
+    color: var(--muted);
+    font-style: italic;
+  }
+
+  footer {
+    margin-top: 12mm;
+    padding-top: 3mm;
+    border-top: 0.5pt solid var(--line);
+    font-size: 8pt;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    {% if logo %}<img class="logo" src="{{ logo }}" alt="">{% else %}<div></div>{% endif %}
+    <div class="req">
+      <strong>{{ brand.company }}</strong>
+      {% if brand.legal_id %}{{ brand.legal_id }}<br>{% endif %}
+      {% if brand.address %}{{ brand.address }}<br>{% endif %}
+      {% if brand.phone %}{{ brand.phone }}<br>{% endif %}
+      {% if brand.email %}{{ brand.email }}{% endif %}
+    </div>
+  </header>
+
+  <h1>{{ kp.title | default('Коммерческое предложение') }}</h1>
+  <div class="meta">№&nbsp;<b>{{ number }}</b> от <b>{{ date }}</b></div>
+
+  <div class="client">
+    <div class="who">Для</div>
+    <div class="name">{{ kp.client.name }}</div>
+    {% if kp.client.contact or kp.client.position %}
+      <div class="extra">{{ kp.client.contact }}{% if kp.client.position %}, {{ kp.client.position }}{% endif %}</div>
+    {% endif %}
+  </div>
+
+  {% if kp.intro %}<div class="intro">{{ kp.intro }}</div>{% endif %}
+
+  <table>
+    <thead>
+      <tr>
+        <th class="idx">№</th>
+        <th>Наименование</th>
+        <th class="num">Кол-во</th>
+        <th class="num">Ед.</th>
+        <th class="num">Цена</th>
+        <th class="num">Сумма</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in totals.rows %}
+      <tr>
+        <td class="idx">{{ r.n }}</td>
+        <td>
+          {{ r.name }}
+          {% if r.note %}<div class="note">{{ r.note }}</div>{% endif %}
+        </td>
+        <td class="num">{{ r.qty }}</td>
+        <td class="num">{{ r.unit }}</td>
+        <td class="num">{{ r.price }}</td>
+        <td class="num">{{ r.total }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="totals">
+    <div><span>Итого по позициям</span><span>{{ totals.subtotal }}&nbsp;{{ totals.currency }}</span></div>
+    {% if totals.has_discount %}
+    <div class="sep"><span>Скидка {{ totals.discount_pct }}%</span><span>−{{ totals.discount }}&nbsp;{{ totals.currency }}</span></div>
+    {% endif %}
+    {% if totals.has_vat %}
+    <div class="sep"><span>НДС {{ totals.vat_rate }}%{% if totals.vat_included %} (в т.ч.){% endif %}</span><span>{{ totals.vat }}&nbsp;{{ totals.currency }}</span></div>
+    {% endif %}
+    <div class="grand"><span>К оплате</span><span>{{ totals.grand }}&nbsp;{{ totals.currency }}</span></div>
+  </div>
+  {% if not totals.has_vat %}<div class="vat-note">НДС не облагается</div>{% endif %}
+
+  {% if kp.terms %}
+  <div class="terms">
+    <h2>Условия</h2>
+    <ul>{% for t in kp.terms %}<li>{{ t }}</li>{% endfor %}</ul>
+    <div class="validity">Предложение действительно до {{ valid_until }}</div>
+  </div>
+  {% endif %}
+
+  <div class="sign">
+    <div class="role">{{ brand.signer.title | default('Директор') }}</div>
+    {% if signature %}<img class="signature-img" src="{{ signature }}" alt="">{% endif %}
+    {% if stamp %}<img class="stamp-img" src="{{ stamp }}" alt="">{% endif %}
+    {% if draft %}<div class="draft-mark">черновик — без печати и подписи</div>{% endif %}
+    <div class="line"></div>
+    <div class="who">{{ brand.signer.name }}</div>
+  </div>
+
+  <footer>
+    <span>{{ brand.company }}</span>
+    <span>{{ brand.site | default('') }}</span>
+  </footer>
+
+</div>
+</body>
+</html>

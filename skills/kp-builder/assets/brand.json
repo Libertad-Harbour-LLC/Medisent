@@ -1,0 +1,38 @@
+{
+  "company": "РИКО ДИЗАЙН",
+  "legal_id": "CUIT 00-00000000-0",
+  "address": "Buenos Aires, Argentina",
+  "phone": "+54 ...",
+  "email": "info@example.com",
+  "site": "example.com",
+  "currency": "USD",
+  "vat_rate": 21,
+  "vat_included": true,
+  "font_family": "'Helvetica Neue', Arial, sans-serif",
+  "logo": "logo.png",
+  "colors": {
+    "primary": "#1a3a5c",
+    "accent": "#c8102e",
+    "text": "#1c1c1c",
+    "muted": "#6b7280",
+    "line": "#dfe3e8"
+  },
+  "signer": {
+    "name": "Артур",
+    "title": "Директор"
+  },
+  "signature": {
+    "file": "signature.png",
+    "height_mm": 16,
+    "offset_x_mm": 4,
+    "offset_y_mm": 8
+  },
+  "stamp": {
+    "file": "stamp.png",
+    "size_mm": 38,
+    "rotate_deg": -7,
+    "offset_x_mm": 34,
+    "offset_y_mm": 0,
+    "opacity": 0.88
+  }
+}

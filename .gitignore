@@ -1,0 +1,28 @@
+# Секреты
+.env
+*.env
+!.env.example
+
+# Печать и подпись — фактически ключи от подписи документов, в git не попадают
+stamp.png
+signature.png
+skills/kp-builder/assets/stamp.png
+skills/kp-builder/assets/signature.png
+
+# Собранные документы
+*.pdf
+skills/kp-builder/out/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Логи и дампы
+logs/
+*.log
+backups/
