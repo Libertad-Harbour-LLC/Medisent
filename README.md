@@ -96,7 +96,3 @@ scripts/             бэкап базы, получение токена Gmail
   `bot/services/registry_endpoints.py`. Порядок действий —
   [`docs/TODO-LAUNCH.md`, часть C](docs/TODO-LAUNCH.md#часть-c-реестры-росздравнадзора-требуется-разработчик);
 - **сборка Docker-образа** — по той же причине; первую сборку делает Railway.
-
-Разворачивать надо ветку **`claude/add-ten-skills-3zmgco`**: она содержит
-`claude/bot-specification-4anoex` целиком плюс десять коммитов с правками
-ревью.
