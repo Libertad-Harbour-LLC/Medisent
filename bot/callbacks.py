@@ -46,7 +46,7 @@ def build_callback_handler(
 
         # Отвечаем провайдеру сразу: доставка в Telegram может занять минуту,
         # а он ждёт быстрый 200 и иначе будет повторять.
-        task = asyncio.create_task(_deliver(bot, storage, delivery, result))
+        task = asyncio.create_task(deliver_result(bot, storage, delivery, result))
         pending.add(task)
         task.add_done_callback(pending.discard)
         return web.json_response({"code": 200, "msg": "success"})
@@ -54,9 +54,14 @@ def build_callback_handler(
     return handler
 
 
-async def _deliver(
+async def deliver_result(
     bot: Bot, storage: Storage, delivery: DeliveryService, result
 ) -> None:
+    """Достаёт задачу, убирает статус и отправляет файл пользователю.
+
+    В постоянном процессе вызывается фоном, в serverless — прямо в обработчике:
+    там фоновая задача не переживёт возврат ответа.
+    """
     task = await storage.take_task(result.task_id)
     if task is None:
         # Либо чужая задача, либо повторный колбэк по уже доставленной.

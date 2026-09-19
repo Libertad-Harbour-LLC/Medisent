@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from bot.callbacks import build_callback_handler
-from bot.storage import Storage, Task
+from bot.storage import SqliteStorage, Storage, Task
 
 
 @dataclass
@@ -67,7 +67,7 @@ def _callback(task_id: str, *, url: str = "https://cdn.example/x.png") -> dict:
 
 @pytest.fixture
 async def storage(tmp_path) -> Storage:
-    store = Storage(str(tmp_path / "tasks.sqlite3"))
+    store = SqliteStorage(str(tmp_path / "tasks.sqlite3"))
     await store.open()
     yield store
     await store.close()
