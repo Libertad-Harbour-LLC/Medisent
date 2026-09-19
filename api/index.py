@@ -16,10 +16,12 @@ Vercel вызывает это приложение на каждый HTTP-за�
 
 from __future__ import annotations
 
+import hmac
 import logging
 import sys
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 
 # Vercel запускает файл из каталога api/, корень проекта в путь не добавлен.
@@ -55,6 +57,69 @@ async def health() -> dict[str, object]:
         "serverless": config.serverless,
         "public_url": config.public_url or None,
         "remembers_context": _app.storage.remembers,
+    }
+
+
+@app.get("/setup/{token}")
+async def setup(token: str) -> dict[str, object]:
+    """Подключение вебхука одной ссылкой из браузера.
+
+    Адрес вебхука содержит секрет, выведенный из токена бота, — руками его
+    не собрать. Поэтому бот подключает себя сам, а доступ к этой странице
+    закрыт тем же токеном: кто его знает, и так управляет ботом.
+    """
+    # Байты, а не строки: compare_digest не принимает не-ASCII, а в путь может
+    # прилететь что угодно.
+    if not hmac.compare_digest(
+        token.encode("utf-8", "surrogatepass"), _app.config.telegram_token.encode()
+    ):
+        raise HTTPException(404, "not found")
+
+    config = _app.config
+    if not config.public_url:
+        raise HTTPException(
+            500, "Бот не знает своего адреса. Задайте PUBLIC_URL и передеплойте."
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                f"https://api.telegram.org/bot{config.telegram_token}/setWebhook",
+                json={
+                    "url": config.telegram_webhook_url,
+                    "secret_token": config.telegram_webhook_secret,
+                    "drop_pending_updates": True,
+                    "allowed_updates": ["message"],
+                },
+            )
+            body = response.json()
+    except httpx.HTTPError as exc:
+        log.warning("setWebhook не дошёл: %s", exc)
+        return {
+            "подключено": False,
+            "ответ_telegram": f"Telegram недоступен: {exc}",
+            "дальше": "Попробуйте открыть эту страницу ещё раз через минуту.",
+        }
+    except ValueError as exc:
+        log.warning("setWebhook вернул не JSON: %s", exc)
+        return {
+            "подключено": False,
+            "ответ_telegram": "Telegram ответил не по формату",
+            "дальше": "Проверьте, что TELEGRAM_BOT_TOKEN скопирован целиком.",
+        }
+
+    ok = bool(body.get("ok"))
+    log.info("setWebhook: %s", body)
+
+    return {
+        "подключено": ok,
+        "адрес": config.telegram_webhook_url if ok else None,
+        "ответ_telegram": body.get("description") or body,
+        "дальше": (
+            "Напишите боту /start — он должен ответить."
+            if ok
+            else "Telegram отказал, смотрите ответ выше."
+        ),
     }
 
 

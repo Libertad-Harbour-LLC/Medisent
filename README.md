@@ -64,22 +64,18 @@ Telegram ──вебхук или polling──> бот ──createTask──>
 
 **2. Деплой.** Любой пуш в ветку продакшена. Пресет — **Python**, Root Directory `./`.
 
-**3. Вебхук Telegram.** Один раз после первого успешного деплоя:
-
-```bash
-python scripts/setup_webhook.py --set      # зарегистрировать
-python scripts/setup_webhook.py            # посмотреть состояние
-python scripts/setup_webhook.py --delete   # снять
-```
-
-Или вручную, если Python под рукой нет:
+**3. Вебхук Telegram.** Один раз после первого успешного деплоя откройте
+в браузере:
 
 ```
-https://api.telegram.org/bot<ТОКЕН>/setWebhook?url=https://<домен>/telegram/<СЕКРЕТ>&secret_token=<СЕКРЕТ>
+https://<домен>/setup/<ТОКЕН ВАШЕГО БОТА>
 ```
 
-Секрет показывает `python scripts/setup_webhook.py` — он же подставляет его сам
-при `--set`.
+Бот подключит себя к Telegram сам и ответит `"подключено": true`. Страница
+закрыта тем же токеном бота: кто его знает, и так управляет ботом.
+
+Локально то же самое делает `python scripts/setup_webhook.py --set`
+(`--delete` — снять вебхук, например чтобы запустить поллинг).
 
 **4. Проверка.** `https://<домен>/health` должен вернуть
 `{"status":"ok","serverless":true,...}`.
