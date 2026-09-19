@@ -1,8 +1,11 @@
 """Приём колбэков провайдера и доставка результата в чат.
 
-Провайдер шлёт POST на callBackUrl, когда задача завершилась — успешно или нет.
-Секрет в пути — единственная защита, которую даёт их API: подписи запроса в
-предоставленной документации нет.
+Куда отправлять результат, известно из самого адреса колбэка: маршрут подписан
+и лежит в пути (см. services/tokens.py). Никакого хранилища между вызовами.
+
+Защита от повторной доставки — сообщение со статусом («Рисую…»). Удалить его
+можно ровно один раз: если Telegram отвечает, что удалять нечего, значит этот
+колбэк уже отработал и файл отправлять не надо.
 """
 
 from __future__ import annotations
@@ -11,28 +14,33 @@ import asyncio
 import logging
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
 from aiohttp import web
 
 from . import texts
 from .services.delivery import DeliveryService
-from .services.jobs import parse_callback
-from .storage import Storage
+from .services.jobs import TaskResult, parse_callback
+from .services.tokens import BadToken, Route, decode
 
 log = logging.getLogger(__name__)
 
 
-def build_callback_handler(
-    bot: Bot, storage: Storage, delivery: DeliveryService
-) -> web.Handler:
+def build_callback_handler(bot: Bot, delivery: DeliveryService, secret: str) -> web.Handler:
+    """Обработчик для постоянного процесса (aiohttp)."""
     # Ссылки на фоновые задачи: без них сборщик мусора может убить доставку
     # на середине, пока провайдер уже получил свой 200.
     pending: set[asyncio.Task] = set()
 
     async def handler(request: web.Request) -> web.Response:
         try:
+            route = decode(request.match_info["token"], secret)
+        except BadToken as exc:
+            log.warning("колбэк с негодным токеном от %s: %s", request.remote, exc)
+            return web.json_response({"code": 403, "msg": "bad token"}, status=403)
+
+        try:
             body = await request.json()
         except Exception:  # noqa: BLE001 - тело пришло извне, доверия нет
-            log.warning("колбэк с нечитаемым телом от %s", request.remote)
             return web.json_response({"code": 400, "msg": "bad json"}, status=400)
 
         if not isinstance(body, dict):
@@ -44,9 +52,9 @@ def build_callback_handler(
             log.warning("колбэк не разобрался: %s", exc)
             return web.json_response({"code": 400, "msg": str(exc)}, status=400)
 
-        # Отвечаем провайдеру сразу: доставка в Telegram может занять минуту,
-        # а он ждёт быстрый 200 и иначе будет повторять.
-        task = asyncio.create_task(deliver_result(bot, storage, delivery, result))
+        # Отвечаем провайдеру сразу: доставка может занять минуту, а он ждёт
+        # быстрый 200 и иначе будет повторять.
+        task = asyncio.create_task(deliver_result(bot, delivery, route, result))
         pending.add(task)
         task.add_done_callback(pending.discard)
         return web.json_response({"code": 200, "msg": "success"})
@@ -55,48 +63,60 @@ def build_callback_handler(
 
 
 async def deliver_result(
-    bot: Bot, storage: Storage, delivery: DeliveryService, result
+    bot: Bot, delivery: DeliveryService, route: Route, result: TaskResult
 ) -> None:
-    """Достаёт задачу, убирает статус и отправляет файл пользователю.
+    """Убирает статус и отправляет файл пользователю.
 
     В постоянном процессе вызывается фоном, в serverless — прямо в обработчике:
     там фоновая задача не переживёт возврат ответа.
     """
-    task = await storage.take_task(result.task_id)
-    if task is None:
-        # Либо чужая задача, либо повторный колбэк по уже доставленной.
-        log.info("%s: задачи нет в хранилище, пропускаю", result.task_id)
+    if not await _claim(bot, route):
+        log.info("%s: статус уже убран, считаю колбэк повторным", result.task_id)
         return
-
-    if task.status_msg is not None:
-        try:
-            await bot.delete_message(task.chat_id, task.status_msg)
-        except Exception as exc:  # noqa: BLE001 - сообщение могли удалить руками
-            log.debug("не удалось убрать статус: %s", exc)
 
     if not result.success:
         log.warning("задача %s провалилась: %s", result.task_id, result.error)
         await bot.send_message(
-            task.chat_id, texts.GENERATION_FAILED.format(reason=result.error)
+            route.chat_id, texts.GENERATION_FAILED.format(reason=result.error)
         )
         return
 
     url = result.urls[0]
-    caption = task.prompt[:1000]
     log.info(
-        "задача %s готова: %s, %.3f кредита", result.task_id, task.kind, result.credits
+        "задача %s готова: %s, %.3f кредита", result.task_id, route.kind, result.credits
     )
 
     try:
-        if task.kind == "video":
-            await delivery.send_video(task.chat_id, url, caption)
+        if route.kind == "video":
+            await delivery.send_video(route.chat_id, url, route.prompt)
         else:
-            await delivery.send_image(task.chat_id, url, caption)
+            await delivery.send_image(route.chat_id, url, route.prompt)
     except Exception as exc:  # noqa: BLE001 - отдаём ссылку, раз файл не дошёл
         log.exception("не удалось доставить %s", result.task_id)
         await bot.send_message(
-            task.chat_id, texts.DELIVERY_FAILED.format(reason=exc, url=url)
+            route.chat_id, texts.DELIVERY_FAILED.format(reason=exc, url=url)
         )
+
+
+async def _claim(bot: Bot, route: Route) -> bool:
+    """Пытается забрать задачу, удалив сообщение со статусом.
+
+    Удаление удаётся один раз — это и есть защита от повторного колбэка,
+    причём без всякого хранилища: состояние держит сам Telegram.
+    """
+    if route.status_msg is None:
+        # Статуса не было, дедуплицировать нечем — доставляем.
+        return True
+
+    try:
+        await bot.delete_message(route.chat_id, route.status_msg)
+        return True
+    except TelegramBadRequest as exc:
+        log.info("статус %s уже удалён: %s", route.status_msg, exc.message)
+        return False
+    except Exception as exc:  # noqa: BLE001 - не смогли убрать, но доставить надо
+        log.warning("не удалось убрать статус: %s", exc)
+        return True
 
 
 async def health(_: web.Request) -> web.Response:

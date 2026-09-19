@@ -95,29 +95,25 @@ class TaskResult:
 
 
 class JobsService:
-    def __init__(
-        self,
-        client: KieClient,
-        *,
-        image_model: str,
-        video_model: str,
-        callback_url: str = "",
-    ) -> None:
+    def __init__(self, client: KieClient, *, image_model: str, video_model: str) -> None:
         self._client = client
         self._image_model = image_model
         self._video_model = video_model
-        self._callback_url = callback_url
 
-    async def create_image(self, params: ImageParams) -> str:
-        return await self._create(self._image_model, params.as_input())
+    async def create_image(self, params: ImageParams, callback_url: str = "") -> str:
+        return await self._create(self._image_model, params.as_input(), callback_url)
 
-    async def create_video(self, params: VideoParams) -> str:
-        return await self._create(self._video_model, params.as_input())
+    async def create_video(self, params: VideoParams, callback_url: str = "") -> str:
+        return await self._create(self._video_model, params.as_input(), callback_url)
 
-    async def _create(self, model: str, task_input: dict[str, Any]) -> str:
+    async def _create(
+        self, model: str, task_input: dict[str, Any], callback_url: str
+    ) -> str:
         payload: dict[str, Any] = {"model": model, "input": task_input}
-        if self._callback_url:
-            payload["callBackUrl"] = self._callback_url
+        if callback_url:
+            # Адрес свой у каждой задачи: в нём зашито, в какой чат вернуть
+            # результат. Поэтому запоминать задачу где-то ещё не нужно.
+            payload["callBackUrl"] = callback_url
 
         body = await self._client.post(CREATE_TASK_PATH, payload)
         data = body.get("data")

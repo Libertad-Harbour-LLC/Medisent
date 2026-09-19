@@ -61,8 +61,8 @@ def build_app(config: Config | None = None) -> App:
 
     if not config.callbacks_enabled:
         log.warning(
-            "PUBLIC_URL или CALLBACK_SECRET не заданы — задачи будут создаваться, "
-            "но результат в чат не придёт"
+            "PUBLIC_URL не задан — картинки и видео заказать не получится, "
+            "принять результат будет некуда"
         )
     if not config.restricted:
         log.warning("TELEGRAM_ALLOWED_USER_IDS пуст — бот отвечает кому угодно")
@@ -86,10 +86,7 @@ def build_app(config: Config | None = None) -> App:
         storage=storage,
         claude=ClaudeService(kie, config.chat_model, config.max_reply_tokens),
         jobs_service=JobsService(
-            kie,
-            image_model=config.image_model,
-            video_model=config.video_model,
-            callback_url=config.callback_url if config.callbacks_enabled else "",
+            kie, image_model=config.image_model, video_model=config.video_model
         ),
         config=config,
     )

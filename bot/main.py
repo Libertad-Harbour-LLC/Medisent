@@ -23,9 +23,10 @@ async def run_web_app(app: App) -> web.AppRunner:
     web_app.router.add_get("/health", health)
 
     if config.callbacks_enabled:
+        # Маршрут доставки приезжает подписанным токеном в конце пути.
         web_app.router.add_post(
-            config.callback_path,
-            build_callback_handler(app.bot, app.storage, app.delivery),
+            f"{config.callback_base}/{{token}}",
+            build_callback_handler(app.bot, app.delivery, config.callback_secret),
         )
 
     runner = web.AppRunner(web_app)

@@ -16,7 +16,7 @@ from ..services.args import ArgError, ParsedCommand, parse
 from ..services.errors import explain
 from ..services.jobs import ImageParams, JobsService, VideoParams
 from ..services.kie import KieError
-from ..storage import Storage, Task
+from ..services.tokens import Route, encode
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,6 @@ router = Router(name="generate")
 async def on_image(
     message: Message,
     command: CommandObject,
-    storage: Storage,
     jobs_service: JobsService,
     config: Config,
 ) -> None:
@@ -48,12 +47,11 @@ async def on_image(
 
     await _submit(
         message,
-        storage,
         config,
         kind="image",
         prompt=params.prompt,
         queued_text=texts.IMAGE_QUEUED,
-        create=lambda: jobs_service.create_image(params),
+        create=lambda url: jobs_service.create_image(params, url),
     )
 
 
@@ -61,7 +59,6 @@ async def on_image(
 async def on_video(
     message: Message,
     command: CommandObject,
-    storage: Storage,
     jobs_service: JobsService,
     config: Config,
 ) -> None:
@@ -85,12 +82,11 @@ async def on_video(
 
     await _submit(
         message,
-        storage,
         config,
         kind="video",
         prompt=params.prompt,
         queued_text=texts.VIDEO_QUEUED,
-        create=lambda: jobs_service.create_video(params),
+        create=lambda url: jobs_service.create_video(params, url),
     )
 
 
@@ -116,45 +112,42 @@ async def _parse_command(
 
 async def _submit(
     message: Message,
-    storage: Storage,
     config: Config,
     *,
     kind: str,
     prompt: str,
     queued_text: str,
-    create: Callable[[], Awaitable[str]],
+    create: Callable[[str], Awaitable[str]],
 ) -> None:
     if message.from_user is None:
-        return
-
-    try:
-        task_id = await create()
-    except KieError as error:
-        log.warning("не удалось создать задачу %s: %s", kind, error)
-        await message.answer(explain(error))
-        return
-    except ValueError as error:
-        log.error("неожиданный ответ провайдера: %s", error)
-        await message.answer(texts.ERROR_GENERIC.format(code="—", detail=str(error)))
         return
 
     if not config.callbacks_enabled:
         # Без публичного адреса забрать результат нечем: спецификации опроса
         # статуса задачи у нас нет, только колбэк.
-        await message.answer(texts.TASK_ACCEPTED_NO_CALLBACK.format(task_id=task_id))
+        await message.answer(texts.NO_PUBLIC_URL)
         return
 
+    # Сообщение со статусом ставим заранее: его идентификатор едет в адресе
+    # колбэка и служит защитой от повторной доставки.
     status = await message.answer(queued_text)
-    await storage.add_task(
-        Task(
-            task_id=task_id,
-            kind=kind,
-            chat_id=message.chat.id,
-            user_id=message.from_user.id,
-            status_msg=status.message_id,
-            prompt=prompt,
-        )
+    route = Route(
+        chat_id=message.chat.id,
+        status_msg=status.message_id,
+        kind=kind,
+        prompt=prompt,
     )
+    callback_url = config.callback_url(encode(route, config.callback_secret))
+
+    try:
+        await create(callback_url)
+    except KieError as error:
+        log.warning("не удалось создать задачу %s: %s", kind, error)
+        await status.edit_text(explain(error))
+        return
+    except ValueError as error:
+        log.error("неожиданный ответ провайдера: %s", error)
+        await status.edit_text(texts.ERROR_GENERIC.format(code="—", detail=str(error)))
 
 
 def _bad_arg(raw: str) -> str:
